@@ -28,9 +28,9 @@ import gin
 import tensorflow as tf
 
 from tf_agents.agents import tf_agent
-from tf_agents.environments import trajectory
 from tf_agents.policies import actor_policy
 from tf_agents.policies import ou_noise_policy
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
@@ -54,6 +54,8 @@ class DdpgAgent(tf_agent.TFAgent):
                critic_optimizer=None,
                ou_stddev=1.0,
                ou_damping=1.0,
+               target_actor_network=None,
+               target_critic_network=None,
                target_update_tau=1.0,
                target_update_period=1,
                dqda_clipping=None,
@@ -71,22 +73,44 @@ class DdpgAgent(tf_agent.TFAgent):
       time_step_spec: A `TimeStep` spec of the expected time_steps.
       action_spec: A nest of BoundedTensorSpec representing the actions.
       actor_network: A tf_agents.network.Network to be used by the agent. The
-        network will be called with call(observation, step_type).
+        network will be called with call(observation, step_type[, policy_state])
+        and should return (action, new_state).
       critic_network: A tf_agents.network.Network to be used by the agent. The
-        network will be called with call(observation, action, step_type).
+        network will be called with call((observation, action), step_type[,
+        policy_state]) and should return (q_value, new_state).
       actor_optimizer: The optimizer to use for the actor network.
       critic_optimizer: The optimizer to use for the critic network.
       ou_stddev: Standard deviation for the Ornstein-Uhlenbeck (OU) noise added
         in the default collect policy.
       ou_damping: Damping factor for the OU noise added in the default collect
         policy.
+      target_actor_network: (Optional.)  A `tf_agents.network.Network` to be
+        used as the actor target network during Q learning.  Every
+        `target_update_period` train steps, the weights from `actor_network` are
+        copied (possibly withsmoothing via `target_update_tau`) to `
+        target_q_network`.
+
+        If `target_actor_network` is not provided, it is created by making a
+        copy of `actor_network`, which initializes a new network with the same
+        structure and its own layers and weights.
+
+        Performing a `Network.copy` does not work when the network instance
+        already has trainable parameters (e.g., has already been built, or
+        when the network is sharing layers with another).  In these cases, it is
+        up to you to build a copy having weights that are not
+        shared with the original `actor_network`, so that this can be used as a
+        target network.  If you provide a `target_actor_network` that shares any
+        weights with `actor_network`, a warning will be logged but no exception
+        is thrown.
+      target_critic_network: (Optional.) Similar network as target_actor_network
+         but for the critic_network. See documentation for target_actor_network.
       target_update_tau: Factor for soft update of the target networks.
       target_update_period: Period for soft update of the target networks.
       dqda_clipping: when computing the actor loss, clips the gradient dqda
         element-wise between [-dqda_clipping, dqda_clipping]. Does not perform
         clipping if dqda_clipping == 0.
       td_errors_loss_fn:  A function for computing the TD errors loss. If None,
-        a default value of  elementwise huber_loss is used.
+        a default value of elementwise huber_loss is used.
       gamma: A discount factor for future rewards.
       reward_scale_factor: Multiplicative scale for the reward.
       gradient_clipping: Norm length to clip gradients.
@@ -100,12 +124,17 @@ class DdpgAgent(tf_agent.TFAgent):
     """
     tf.Module.__init__(self, name=name)
     self._actor_network = actor_network
-    self._target_actor_network = self._actor_network.copy(
-        name='TargetActorNetwork')
-
+    actor_network.create_variables()
+    if target_actor_network:
+      target_actor_network.create_variables()
+    self._target_actor_network = common.maybe_copy_target_network_with_checks(
+        self._actor_network, target_actor_network, 'TargetActorNetwork')
     self._critic_network = critic_network
-    self._target_critic_network = self._critic_network.copy(
-        name='TargetCriticNetwork')
+    critic_network.create_variables()
+    if target_critic_network:
+      target_critic_network.create_variables()
+    self._target_critic_network = common.maybe_copy_target_network_with_checks(
+        self._critic_network, target_critic_network, 'TargetCriticNetwork')
 
     self._actor_optimizer = actor_optimizer
     self._critic_optimizer = critic_optimizer
@@ -199,25 +228,28 @@ class DdpgAgent(tf_agent.TFAgent):
         experience)
 
     # TODO(b/124382524): Apply a loss mask or filter boundary transitions.
-    critic_variables = self._critic_network.variables
+    trainable_critic_variables = self._critic_network.trainable_variables
     with tf.GradientTape(watch_accessed_variables=False) as tape:
-      assert critic_variables, 'No critic variables to optimize.'
-      tape.watch(critic_variables)
+      assert trainable_critic_variables, ('No trainable critic variables to '
+                                          'optimize.')
+      tape.watch(trainable_critic_variables)
       critic_loss = self.critic_loss(time_steps, actions, next_time_steps,
                                      weights=weights)
     tf.debugging.check_numerics(critic_loss, 'Critic loss is inf or nan.')
-    critic_grads = tape.gradient(critic_loss, critic_variables)
-    self._apply_gradients(critic_grads, critic_variables,
+    critic_grads = tape.gradient(critic_loss, trainable_critic_variables)
+    self._apply_gradients(critic_grads, trainable_critic_variables,
                           self._critic_optimizer)
 
-    actor_variables = self._actor_network.variables
+    trainable_actor_variables = self._actor_network.trainable_variables
     with tf.GradientTape(watch_accessed_variables=False) as tape:
-      assert actor_variables, 'No actor variables to optimize.'
-      tape.watch(actor_variables)
+      assert trainable_actor_variables, ('No trainable actor variables to '
+                                         'optimize.')
+      tape.watch(trainable_actor_variables)
       actor_loss = self.actor_loss(time_steps, weights=weights)
     tf.debugging.check_numerics(actor_loss, 'Actor loss is inf or nan.')
-    actor_grads = tape.gradient(actor_loss, actor_variables)
-    self._apply_gradients(actor_grads, actor_variables, self._actor_optimizer)
+    actor_grads = tape.gradient(actor_loss, trainable_actor_variables)
+    self._apply_gradients(actor_grads, trainable_actor_variables,
+                          self._actor_optimizer)
 
     self.train_step_counter.assign_add(1)
     self._update_target()
@@ -242,7 +274,6 @@ class DdpgAgent(tf_agent.TFAgent):
 
     optimizer.apply_gradients(grads_and_vars)
 
-  @common.function
   def critic_loss(self,
                   time_steps,
                   actions,
@@ -265,6 +296,10 @@ class DdpgAgent(tf_agent.TFAgent):
       target_critic_net_input = (next_time_steps.observation, target_actions)
       target_q_values, _ = self._target_critic_network(
           target_critic_net_input, next_time_steps.step_type)
+      if len(target_q_values.shape) != 1:
+        raise ValueError('Q-network should output a tensor of shape (batch,) '
+                         'but shape {} was returned.'.format(
+                             target_q_values.shape.as_list()))
 
       td_targets = tf.stop_gradient(
           self._reward_scale_factor * next_time_steps.reward +
@@ -298,7 +333,6 @@ class DdpgAgent(tf_agent.TFAgent):
 
       return critic_loss
 
-  @common.function
   def actor_loss(self, time_steps, weights=None):
     """Computes the actor_loss for DDPG training.
 

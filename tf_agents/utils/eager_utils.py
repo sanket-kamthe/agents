@@ -31,7 +31,7 @@ Example of usage:
     train_step_op = eager_utils.create_train_step(loss_op, optimizer)
     # Compute the loss and apply gradients to the variables using the optimizer.
     with tf.Session() as sess:
-      sess.run(tf.global_variables_initializer())
+      sess.run(tf.compat.v1.global_variables_initializer())
       for _ in range(num_train_steps):
         loss_value = sess.run(train_step_op)
 
@@ -465,12 +465,6 @@ def create_train_op(total_loss,
     with tf.control_dependencies([grad_updates]):
       train_op = tf.identity(total_loss, name='train_op')
 
-  # Add the operation used for training to the 'train_op' collection
-  # TODO(b/123908876) Remove use of collections.
-  train_ops = tf.compat.v1.get_collection_ref(tf.compat.v1.GraphKeys.TRAIN_OP)
-  if train_op not in train_ops:
-    train_ops.append(train_op)
-
   return train_op
 
 
@@ -619,7 +613,11 @@ def dataset_iterator(dataset):
   """
   if tf.executing_eagerly():
     return iter(dataset)
-  return tf.compat.v1.data.make_one_shot_iterator(dataset)
+  try:
+    iterator = tf.compat.v1.data.make_one_shot_iterator(dataset)
+  except ValueError:
+    iterator = tf.compat.v1.data.make_initializable_iterator(dataset)
+  return iterator
 
 
 def get_next(iterator):

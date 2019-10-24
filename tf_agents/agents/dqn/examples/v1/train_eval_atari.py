@@ -35,12 +35,14 @@ https://arxiv.org/pdf/1709.06009.pdf.
 To run:
 
 ```bash
-tf_agents/agents/dqn/examples/train_eval_atari \
- --root_dir=$HOME/atari/pong \
- --atari_roms_path=/tmp
- --alsologtostderr
+tf_agents/agents/dqn/examples/v1/train_eval_atari \
+  --root_dir=$HOME/atari/pong \
+  --atari_roms_path=/tmp
+  --alsologtostderr
 ```
 
+Additional flags are available such as `--replay_buffer_capacity` and
+`--n_step_update`.
 """
 
 from __future__ import absolute_import
@@ -53,31 +55,35 @@ from absl import app
 from absl import flags
 from absl import logging
 
+import gin
 import numpy as np
 import tensorflow as tf
 
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.environments import batched_py_environment
 from tf_agents.environments import suite_atari
-from tf_agents.environments import time_step as ts
-from tf_agents.environments import trajectory
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import py_metric
 from tf_agents.metrics import py_metrics
 from tf_agents.networks import q_network
 from tf_agents.policies import epsilon_greedy_policy
-from tf_agents.policies import policy_step
+from tf_agents.policies import policy_saver
 from tf_agents.policies import py_tf_policy
 from tf_agents.policies import random_py_policy
 from tf_agents.replay_buffers import py_hashed_replay_buffer
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 from tf_agents.utils import timer
-import gin.tf
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
                     'Root directory for writing logs/summaries/checkpoints.')
+flags.DEFINE_string('environment_name', None,
+                    'Full name of Atari game to run, ex. PongNoFrameskip-v4.')
 flags.DEFINE_string('game_name', 'Pong', 'Name of Atari game to run.')
+
 flags.DEFINE_integer('num_iterations', None,
                      'Number of train/eval iterations to run.')
 flags.DEFINE_integer('initial_collect_steps', None,
@@ -90,6 +96,8 @@ flags.DEFINE_integer('replay_buffer_capacity', None,
 flags.DEFINE_integer('train_steps_per_iteration', None,
                      'Number of ALE frames to run through for each iteration '
                      'of training.')
+flags.DEFINE_integer('n_step_update', None, 'The number of steps to consider '
+                     'when computing TD error and TD loss.')
 flags.DEFINE_integer('eval_steps_per_iteration', None,
                      'Number of ALE frames to run through for each iteration '
                      'of evaluation.')
@@ -129,8 +137,7 @@ class TrainEval(object):
       num_iterations=200,
       max_episode_frames=108000,  # ALE frames
       terminal_on_life_loss=False,
-      conv_layer_params=(
-          (32, (8, 8), 4), (64, (4, 4), 2), (64, (3, 3), 1)),
+      conv_layer_params=((32, (8, 8), 4), (64, (4, 4), 2), (64, (3, 3), 1)),
       fc_layer_params=(512,),
       # Params for collect
       initial_collect_steps=80000,  # ALE frames
@@ -144,6 +151,7 @@ class TrainEval(object):
       target_update_period=32000,  # ALE frames
       batch_size=32,
       learning_rate=2.5e-4,
+      n_step_update=1,
       gamma=0.99,
       reward_scale_factor=1.0,
       gradient_clipping=None,
@@ -186,6 +194,8 @@ class TrainEval(object):
         the target network.
       batch_size: Number of frames to include in each training batch.
       learning_rate: RMS optimizer learning rate.
+      n_step_update: The number of steps to consider when computing TD error and
+        TD loss. Applies standard single-step updates when set to 1.
       gamma: Discount for future rewards.
       reward_scale_factor: Scaling factor for rewards.
       gradient_clipping: Norm length to clip gradients.
@@ -281,10 +291,11 @@ class TrainEval(object):
             q_network=q_net,
             optimizer=optimizer,
             epsilon_greedy=epsilon,
+            n_step_update=n_step_update,
             target_update_tau=target_update_tau,
             target_update_period=(
                 target_update_period / ATARI_FRAME_SKIP / self._update_period),
-            td_errors_loss_fn=dqn_agent.element_wise_huber_loss,
+            td_errors_loss_fn=common.element_wise_huber_loss,
             gamma=gamma,
             reward_scale_factor=reward_scale_factor,
             gradient_clipping=gradient_clipping,
@@ -292,8 +303,7 @@ class TrainEval(object):
             summarize_grads_and_vars=summarize_grads_and_vars,
             train_step_counter=self._global_step)
 
-        self._collect_policy = py_tf_policy.PyTFPolicy(
-            agent.collect_policy)
+        self._collect_policy = py_tf_policy.PyTFPolicy(agent.collect_policy)
 
         if self._do_eval:
           self._eval_policy = py_tf_policy.PyTFPolicy(
@@ -306,13 +316,13 @@ class TrainEval(object):
         py_action_spec = policy_step.PolicyStep(self._env.action_spec())
         data_spec = trajectory.from_transition(
             py_time_step_spec, py_action_spec, py_time_step_spec)
-        self._replay_buffer = (
-            py_hashed_replay_buffer.PyHashedReplayBuffer(
-                data_spec=data_spec, capacity=replay_buffer_capacity))
+        self._replay_buffer = py_hashed_replay_buffer.PyHashedReplayBuffer(
+            data_spec=data_spec, capacity=replay_buffer_capacity)
 
       with tf.device('/cpu:0'):
         ds = self._replay_buffer.as_dataset(
-            sample_batch_size=batch_size, num_steps=2).prefetch(4)
+            sample_batch_size=batch_size, num_steps=n_step_update + 1)
+        ds = ds.prefetch(4)
         ds = ds.apply(tf.data.experimental.prefetch_to_device('/gpu:0'))
 
       with tf.device('/gpu:0'):
@@ -365,6 +375,9 @@ class TrainEval(object):
                     train_step=self._global_step,
                     step_metrics=(self._iteration_metric,))
 
+        self._train_dir = train_dir
+        self._policy_exporter = policy_saver.PolicySaver(
+            agent.policy, train_step=self._global_step)
         self._train_checkpointer = common.Checkpointer(
             ckpt_dir=train_dir,
             agent=agent,
@@ -434,6 +447,12 @@ class TrainEval(object):
         self._train_checkpointer.save(global_step=global_step_val)
         self._policy_checkpointer.save(global_step=global_step_val)
         self._rb_checkpointer.save(global_step=global_step_val)
+
+        export_dir = os.path.join(self._train_dir, 'saved_policy',
+                                  'step_' + ('%d' % global_step_val).zfill(8))
+        self._policy_exporter.save(export_dir)
+        common.save_spec(self._collect_policy.trajectory_spec,
+                         os.path.join(export_dir, 'trajectory_spec'))
 
   def _initialize_graph(self, sess):
     """Initialize the graph for sess."""
@@ -535,7 +554,7 @@ class TrainEval(object):
       self._store_to_rb(traj)
 
     # When AtariPreprocessing.terminal_on_life_loss is True, we receive LAST
-    # time_steps when lives are lost but the game is not over.In this mode, the
+    # time_steps when lives are lost but the game is not over. In this mode, the
     # replay buffer and agent's policy must see the life loss as a LAST step
     # and the subsequent step as a FIRST step. However, we do not want to
     # actually terminate the episode and metrics should be computed as if all
@@ -580,7 +599,7 @@ class TrainEval(object):
       logging.info('step = %d, loss = %f', global_step_val, total_loss.loss)
       logging.info('%s', 'action_time = {}'.format(self._action_timer.value()))
       logging.info('%s', 'step_time = {}'.format(self._step_timer.value()))
-      logging.info('%s', 'oberver_time = {}'.format(
+      logging.info('%s', 'observer_time = {}'.format(
           self._observer_timer.value()))
       steps_per_sec = ((global_step_val - self._timed_at_step) /
                        (self._collect_timer.value()
@@ -603,30 +622,28 @@ class TrainEval(object):
 def get_run_args():
   """Builds a dict of run arguments from flags."""
   run_args = {}
-
   if FLAGS.num_iterations:
     run_args['num_iterations'] = FLAGS.num_iterations
-
   if FLAGS.initial_collect_steps:
     run_args['initial_collect_steps'] = FLAGS.initial_collect_steps
-
   if FLAGS.replay_buffer_capacity:
     run_args['replay_buffer_capacity'] = FLAGS.replay_buffer_capacity
-
   if FLAGS.train_steps_per_iteration:
     run_args['train_steps_per_iteration'] = FLAGS.train_steps_per_iteration
-
+  if FLAGS.n_step_update:
+    run_args['n_step_update'] = FLAGS.n_step_update
   if FLAGS.eval_steps_per_iteration:
     run_args['eval_steps_per_iteration'] = FLAGS.eval_steps_per_iteration
-
   return run_args
 
 
 def main(_):
   logging.set_verbosity(logging.INFO)
   tf.enable_resource_variables()
-  TrainEval(FLAGS.root_dir, suite_atari.game(name=FLAGS.game_name),
-            **get_run_args()).run()
+  environment_name = FLAGS.environment_name
+  if environment_name is None:
+    environment_name = suite_atari.game(name=FLAGS.game_name)
+  TrainEval(FLAGS.root_dir, environment_name, **get_run_args()).run()
 
 
 if __name__ == '__main__':

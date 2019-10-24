@@ -13,7 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-r"""Train and Eval SAC."""
+r"""Train and Eval SAC.
+
+To run:
+
+```bash
+tensorboard --logdir $HOME/tmp/sac_v1/gym/HalfCheetah-v2/ --port 2223 &
+
+python tf_agents/agents/sac/examples/v1/train_eval.py \
+  --root_dir=$HOME/tmp/sac_v1/gym/HalfCheetah-v2/ \
+  --alsologtostderr
+```
+"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -40,7 +51,9 @@ from tf_agents.metrics import tf_metrics
 from tf_agents.metrics import tf_py_metric
 from tf_agents.networks import actor_distribution_network
 from tf_agents.networks import normal_projection_network
+from tf_agents.policies import greedy_policy
 from tf_agents.policies import py_tf_policy
+from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
 
@@ -72,6 +85,8 @@ def normal_projection_net(action_spec,
 def train_eval(
     root_dir,
     env_name='HalfCheetah-v2',
+    eval_env_name=None,
+    env_load_fn=suite_mujoco.load,
     num_iterations=1000000,
     actor_fc_layers=(256, 256),
     critic_obs_fc_layers=None,
@@ -129,8 +144,9 @@ def train_eval(
   with tf.compat.v2.summary.record_if(
       lambda: tf.math.equal(global_step % summary_interval, 0)):
     # Create the environment.
-    tf_env = tf_py_environment.TFPyEnvironment(suite_mujoco.load(env_name))
-    eval_py_env = suite_mujoco.load(env_name)
+    tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
+    eval_env_name = eval_env_name or env_name
+    eval_py_env = env_load_fn(eval_env_name)
 
     # Get the data specs from the environment
     time_step_spec = tf_env.time_step_spec()
@@ -176,7 +192,8 @@ def train_eval(
         max_length=replay_buffer_capacity)
     replay_observer = [replay_buffer.add_batch]
 
-    eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.policy)
+    eval_py_policy = py_tf_policy.PyTFPolicy(
+        greedy_policy.GreedyPolicy(tf_agent.policy))
 
     train_metrics = [
         tf_metrics.NumberOfEpisodes(),
@@ -186,10 +203,12 @@ def train_eval(
     ]
 
     collect_policy = tf_agent.collect_policy
+    initial_collect_policy = random_tf_policy.RandomTFPolicy(
+        tf_env.time_step_spec(), tf_env.action_spec())
 
     initial_collect_op = dynamic_step_driver.DynamicStepDriver(
         tf_env,
-        collect_policy,
+        initial_collect_policy,
         observers=replay_observer + train_metrics,
         num_steps=initial_collect_steps).run()
 
@@ -204,7 +223,7 @@ def train_eval(
       return ~trajectories.is_boundary()[0]
     dataset = replay_buffer.as_dataset(
         sample_batch_size=5 * batch_size,
-        num_steps=2).apply(tf.data.experimental.unbatch()).filter(
+        num_steps=2).unbatch().filter(
             _filter_invalid_transition).batch(batch_size).prefetch(
                 batch_size * 5)
     dataset_iterator = tf.compat.v1.data.make_initializable_iterator(dataset)

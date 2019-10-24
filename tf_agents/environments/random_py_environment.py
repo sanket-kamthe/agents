@@ -22,8 +22,8 @@ import numpy as np
 import tensorflow as tf
 
 from tf_agents.environments import py_environment
-from tf_agents.environments import time_step as ts
 from tf_agents.specs import array_spec
+from tf_agents.trajectories import time_step as ts
 
 
 class RandomPyEnvironment(py_environment.PyEnvironment):
@@ -169,3 +169,6 @@ class RandomPyEnvironment(py_environment.PyEnvironment):
           format(mode))
 
     return self._rng.randint(0, 256, size=self._render_size, dtype=np.uint8)
+
+  def seed(self, seed):
+    self._rng.seed(seed)

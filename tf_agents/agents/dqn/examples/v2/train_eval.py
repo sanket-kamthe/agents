@@ -18,19 +18,21 @@ r"""Train and Eval DQN.
 To run DQN on CartPole:
 
 ```bash
-tf_agents/agents/dqn/examples/train_eval_gym \
- --root_dir=$HOME/tmp/dqn/gym/cart-pole/ \
- --alsologtostderr
+tensorboard --logdir $HOME/tmp/dqn/gym/CartPole-v0/ --port 2223 &
+
+python tf_agents/agents/dqn/examples/v2/train_eval.py \
+  --root_dir=$HOME/tmp/dqn/gym/CartPole-v0/ \
+  --alsologtostderr
 ```
 
 To run DQN-RNNs on MaskedCartPole:
 
 ```bash
-tf_agents/agents/dqn/examples/train_eval_gym \
- --root_dir=$HOME/tmp/dqn/gym/masked-cart-pole/ \
- --gin_param='train_eval.env_name="MaskedCartPole-v0"' \
- --gin_param='train_eval.train_sequence_length=10' \
- --alsologtostderr
+python tf_agents/agents/dqn/examples/v2/train_eval.py \
+  --root_dir=$HOME/tmp/dqn_rnn/gym/MaskedCartPole-v0/ \
+  --gin_param='train_eval.env_name="MaskedCartPole-v0"' \
+  --gin_param='train_eval.train_sequence_length=10' \
+  --alsologtostderr
 ```
 
 """
@@ -97,6 +99,7 @@ def train_eval(
     train_steps_per_iteration=1,
     batch_size=64,
     learning_rate=1e-3,
+    n_step_update=1,
     gamma=0.99,
     reward_scale_factor=1.0,
     gradient_clipping=None,
@@ -137,6 +140,11 @@ def train_eval(
     tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
     eval_tf_env = tf_py_environment.TFPyEnvironment(suite_gym.load(env_name))
 
+    if train_sequence_length != 1 and n_step_update != 1:
+      raise NotImplementedError(
+          'train_eval does not currently support n-step updates with stateful '
+          'networks (i.e., RNNs)')
+
     if train_sequence_length > 1:
       q_net = q_rnn_network.QRnnNetwork(
           tf_env.observation_spec(),
@@ -149,6 +157,7 @@ def train_eval(
           tf_env.observation_spec(),
           tf_env.action_spec(),
           fc_layer_params=fc_layer_params)
+      train_sequence_length = n_step_update
 
     # TODO(b/127301657): Decay epsilon based on global step, cf. cl/188907839
     tf_agent = dqn_agent.DqnAgent(
@@ -156,10 +165,11 @@ def train_eval(
         tf_env.action_spec(),
         q_network=q_net,
         epsilon_greedy=epsilon_greedy,
+        n_step_update=n_step_update,
         target_update_tau=target_update_tau,
         target_update_period=target_update_period,
         optimizer=tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate),
-        td_errors_loss_fn=dqn_agent.element_wise_squared_loss,
+        td_errors_loss_fn=common.element_wise_squared_loss,
         gamma=gamma,
         reward_scale_factor=reward_scale_factor,
         gradient_clipping=gradient_clipping,
@@ -250,6 +260,13 @@ def train_eval(
         num_steps=train_sequence_length + 1).prefetch(3)
     iterator = iter(dataset)
 
+    def train_step():
+      experience, _ = next(iterator)
+      return tf_agent.train(experience)
+
+    if use_tf_functions:
+      train_step = common.function(train_step)
+
     for _ in range(num_iterations):
       start_time = time.time()
       time_step, policy_state = collect_driver.run(
@@ -257,8 +274,7 @@ def train_eval(
           policy_state=policy_state,
       )
       for _ in range(train_steps_per_iteration):
-        experience, _ = next(iterator)
-        train_loss = tf_agent.train(experience)
+        train_loss = train_step()
       time_acc += time.time() - start_time
 
       if global_step.numpy() % log_interval == 0:

@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sample recurrent Actor network to use with DDPG agents."""
+"""Sample recurrent Actor network to use with DDPG agents.
+
+Note: This network scales actions to fit the given spec by using `tanh`. Due to
+the nature of the `tanh` function, actions near the spec bounds cannot be
+returned.
+"""
 
 import functools
 import gin
 import tensorflow as tf
-
-from tf_agents.environments import time_step
 from tf_agents.networks import dynamic_unroll_layer
 from tf_agents.networks import network
 from tf_agents.networks import utils
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step
 from tf_agents.utils import common
 from tf_agents.utils import nest_utils
 

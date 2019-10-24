@@ -22,6 +22,8 @@ from __future__ import print_function
 import abc
 import tensorflow as tf
 
+from tensorflow.python.data.util import nest as data_nest  # pylint:disable=g-direct-tensorflow-import  # TF internal
+
 
 class ReplayBuffer(tf.Module):
   """Abstract base class for TF-Agents replay buffer.
@@ -30,17 +32,19 @@ class ReplayBuffer(tf.Module):
   mode, methods return ops that do so when executed.
   """
 
-  def __init__(self, data_spec, capacity):
+  def __init__(self, data_spec, capacity, stateful_dataset=False):
     """Initializes the replay buffer.
 
     Args:
       data_spec: A spec or a list/tuple/nest of specs describing
         a single item that can be stored in this buffer
       capacity: number of elements that the replay buffer can hold.
+      stateful_dataset: whether the dataset contains stateful ops or not.
     """
     super(ReplayBuffer, self).__init__()
     self._data_spec = data_spec
     self._capacity = capacity
+    self._stateful_dataset = stateful_dataset
 
   @property
   def data_spec(self):
@@ -51,6 +55,15 @@ class ReplayBuffer(tf.Module):
   def capacity(self):
     """Returns the capacity of the replay buffer."""
     return self._capacity
+
+  @property
+  def stateful_dataset(self):
+    """Returns whether the dataset of the replay buffer has stateful ops."""
+    return self._stateful_dataset
+
+  def num_frames(self):
+    """Returns the number of frames in the replay buffer."""
+    return self._num_frames()
 
   def add_batch(self, items):
     """Adds a batch of items to the replay buffer.
@@ -116,7 +129,8 @@ class ReplayBuffer(tf.Module):
   def as_dataset(self,
                  sample_batch_size=None,
                  num_steps=None,
-                 num_parallel_calls=None):
+                 num_parallel_calls=None,
+                 single_deterministic_pass=False):
     """Creates and returns a dataset that returns entries from the buffer.
 
     A single entry from the dataset is equivalent to one output from
@@ -139,16 +153,54 @@ class ReplayBuffer(tf.Module):
       num_parallel_calls: (Optional.) A `tf.int32` scalar `tf.Tensor`,
         representing the number elements to process in parallel. If not
         specified, elements will be processed sequentially.
+      single_deterministic_pass: Python boolean.  If `True`, the dataset
+        will return a single deterministic pass through its underlying data.
+        **NOTE**: If the buffer is modified while a Dataset iterator is
+        iterating over this data, the iterator may miss any new data or
+        otherwise have subtly invalid data.
 
     Returns:
       A dataset of type tf.data.Dataset, elements of which are 2-tuples of:
         - An item or sequence of items or batch thereof
         - Auxiliary info for the items (i.e. ids, probs).
+
+    Raises:
+      NotImplementedError: If a non-default argument value is not supported.
+      ValueError: If the data spec contains lists that must be converted to
+        tuples.
     """
-    return self._as_dataset(sample_batch_size, num_steps, num_parallel_calls)
+    # data_tf.nest.flatten does not flatten python lists, nest.flatten does.
+    if tf.nest.flatten(self._data_spec) != data_nest.flatten(self._data_spec):
+      raise ValueError(
+          'Cannot perform gather; data spec contains lists and this conflicts '
+          'with gathering operator.  Convert any lists to tuples.  '
+          'For example, if your spec looks like [a, b, c], '
+          'change it to (a, b, c).  Spec structure is:\n  {}'.format(
+              tf.nest.map_structure(lambda spec: spec.dtype, self._data_spec)))
+
+    if single_deterministic_pass:
+      ds = self._single_deterministic_pass_dataset(
+          sample_batch_size=sample_batch_size,
+          num_steps=num_steps,
+          num_parallel_calls=num_parallel_calls)
+    else:
+      ds = self._as_dataset(
+          sample_batch_size=sample_batch_size,
+          num_steps=num_steps,
+          num_parallel_calls=num_parallel_calls)
+
+    if self._stateful_dataset:
+      options = tf.data.Options()
+      if hasattr(options, 'experimental_allow_stateful'):
+        options.experimental_allow_stateful = True
+        ds = ds.with_options(options)
+    return ds
 
   def gather_all(self):
     """Returns all the items in buffer.
+
+    **NOTE** This method will soon be deprecated in favor of
+    `as_dataset(..., single_deterministic_pass=True)`.
 
     Returns:
       Returns all the items currently in the buffer. Returns a tensor
@@ -167,8 +219,14 @@ class ReplayBuffer(tf.Module):
 
   # Subclasses must implement these methods.
   @abc.abstractmethod
+  def _num_frames(self):
+    """Returns the number of frames in the replay buffer."""
+    raise NotImplementedError
+
+  @abc.abstractmethod
   def _add_batch(self, items):
     """Adds a batch of items to the replay buffer."""
+    raise NotImplementedError
 
   @abc.abstractmethod
   def _get_next(self,
@@ -176,6 +234,7 @@ class ReplayBuffer(tf.Module):
                 num_steps=None,
                 time_stacked=True):
     """Returns an item or batch of items from the buffer."""
+    raise NotImplementedError
 
   @abc.abstractmethod
   def _as_dataset(self,
@@ -183,12 +242,22 @@ class ReplayBuffer(tf.Module):
                   num_steps=None,
                   num_parallel_calls=None):
     """Creates and returns a dataset that returns entries from the buffer."""
+    raise NotImplementedError
+
+  @abc.abstractmethod
+  def _single_deterministic_pass_dataset(self,
+                                         sample_batch_size=None,
+                                         num_steps=None,
+                                         num_parallel_calls=None):
+    """Creates and returns a dataset that returns entries from the buffer."""
+    raise NotImplementedError
 
   @abc.abstractmethod
   def _gather_all(self):
     """Returns all the items in buffer."""
+    raise NotImplementedError
 
   @abc.abstractmethod
   def _clear(self):
     """Clears the replay buffer."""
-
+    raise NotImplementedError

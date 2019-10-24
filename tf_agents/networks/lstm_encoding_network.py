@@ -30,16 +30,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import gin
 import tensorflow as tf
 
-from tf_agents.environments import time_step
 from tf_agents.networks import dynamic_unroll_layer
 from tf_agents.networks import encoding_network
 from tf_agents.networks import network
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step
 from tf_agents.utils import nest_utils
-
-import gin.tf
 
 
 KERAS_LSTM_FUSED_IMPLEMENTATION = 2
@@ -153,15 +152,17 @@ class LSTMEncodingNetwork(network.Network):
           for size in lstm_size
       ])
 
-    output_encoder = ([
-        tf.keras.layers.Dense(
-            num_units,
-            activation=activation_fn,
-            kernel_initializer=kernel_initializer,
-            dtype=dtype,
-            name='/'.join([name, 'dense']))
-        for num_units in output_fc_layer_params
-    ])
+    output_encoder = []
+    if output_fc_layer_params:
+      output_encoder = [
+          tf.keras.layers.Dense(
+              num_units,
+              activation=activation_fn,
+              kernel_initializer=kernel_initializer,
+              dtype=dtype,
+              name='/'.join([name, 'dense']))
+          for num_units in output_fc_layer_params
+      ]
 
     counter = [-1]
     def create_spec(size):

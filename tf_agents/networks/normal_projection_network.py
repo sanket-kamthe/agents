@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import gin
 import tensorflow as tf
 import tensorflow_probability as tfp
 
@@ -28,10 +29,9 @@ from tf_agents.networks import utils as network_utils
 from tf_agents.specs import distribution_spec
 from tf_agents.specs import tensor_spec
 
-import gin.tf
-
 
 def tanh_squash_to_spec(inputs, spec):
+  """Maps inputs with arbitrary range to range defined by spec using `tanh`."""
   means = (spec.maximum + spec.minimum) / 2.0
   magnitudes = (spec.maximum - spec.minimum) / 2.0
 
@@ -42,14 +42,18 @@ def tanh_squash_to_spec(inputs, spec):
 class NormalProjectionNetwork(network.DistributionNetwork):
   """Generates a tfp.distribution.Normal by predicting a mean and std.
 
-  Note: the standard deviations are independent of the input.
+  Note: By default this network uses `tanh_squash_to_spec` to normalize its
+  output. Due to the nature of the `tanh` function, values near the spec bounds
+  cannot be returned.
+
+  Note: The standard deviations are independent of the input.
   """
 
   def __init__(self,
                sample_spec,
                activation_fn=None,
                init_means_output_factor=0.1,
-               std_initializer_value=0.0,
+               std_bias_initializer_value=0.0,
                mean_transform=tanh_squash_to_spec,
                std_transform=tf.nn.softplus,
                state_dependent_std=False,
@@ -58,14 +62,16 @@ class NormalProjectionNetwork(network.DistributionNetwork):
     """Creates an instance of NormalProjectionNetwork.
 
     Args:
-      sample_spec: A spec (either BoundedArraySpec or BoundedTensorSpec)
-        detailing the shape and dtypes of samples pulled from the output
-        distribution.
+      sample_spec: A `tensor_spec.BoundedTensorSpec` detailing the shape and
+        dtypes of samples pulled from the output distribution.
       activation_fn: Activation function to use in dense layer.
       init_means_output_factor: Output factor for initializing action means
         weights.
-      std_initializer_value: Initial value for std variables.
-      mean_transform: Transform to apply to the calculated means
+      std_bias_initializer_value: Initial value for the bias of the
+        stddev_projection_layer or the direct bias_layer depending on the
+        state_dependent_std flag.
+      mean_transform: Transform to apply to the calculated means. Uses
+        `tanh_squash_to_spec` by default.
       std_transform: Transform to apply to the stddevs.
       state_dependent_std: If true, stddevs will be produced by MLP from state.
         else, stddevs will be an independent variable.
@@ -79,7 +85,7 @@ class NormalProjectionNetwork(network.DistributionNetwork):
       raise ValueError('Normal Projection network only supports single spec '
                        'samples.')
     self._scale_distribution = scale_distribution
-    output_spec = self._output_distribution_spec(sample_spec)
+    output_spec = self._output_distribution_spec(sample_spec, name)
     super(NormalProjectionNetwork, self).__init__(
         # We don't need these, but base class requires them.
         input_tensor_spec=None,
@@ -107,21 +113,25 @@ class NormalProjectionNetwork(network.DistributionNetwork):
           activation=activation_fn,
           kernel_initializer=tf.compat.v1.keras.initializers.VarianceScaling(
               scale=init_means_output_factor),
-          bias_initializer=tf.keras.initializers.Zeros(),
+          bias_initializer=tf.keras.initializers.Constant(
+              value=std_bias_initializer_value),
           name='stddev_projection_layer')
+    else:
+      self._bias = bias_layer.BiasLayer(
+          bias_initializer=tf.keras.initializers.Constant(
+              value=std_bias_initializer_value))
 
-    self._bias = bias_layer.BiasLayer(
-        bias_initializer=tf.keras.initializers.Constant(
-            value=std_initializer_value))
-
-  def _output_distribution_spec(self, sample_spec):
+  def _output_distribution_spec(self, sample_spec, network_name):
     input_param_shapes = tfp.distributions.Normal.param_static_shapes(
         sample_spec.shape)
-    input_param_spec = tf.nest.map_structure(
-        lambda tensor_shape: tensor_spec.TensorSpec(  # pylint: disable=g-long-lambda
-            shape=tensor_shape,
-            dtype=sample_spec.dtype),
-        input_param_shapes)
+
+    input_param_spec = {
+        name: tensor_spec.TensorSpec(  # pylint: disable=g-complex-comprehension
+            shape=shape,
+            dtype=sample_spec.dtype,
+            name=network_name + '_' + name)
+        for name, shape in input_param_shapes.items()
+    }
 
     def distribution_builder(*args, **kwargs):
       distribution = tfp.distributions.Normal(*args, **kwargs)
@@ -146,7 +156,8 @@ class NormalProjectionNetwork(network.DistributionNetwork):
     means = self._means_projection_layer(inputs)
     means = tf.reshape(means, [-1] + self._sample_spec.shape.as_list())
 
-    if self._mean_transform is not None:
+    # If scaling the distribution later, use a normalized mean.
+    if not self._scale_distribution and self._mean_transform is not None:
       means = self._mean_transform(means, self._sample_spec)
     means = tf.cast(means, self._sample_spec.dtype)
 

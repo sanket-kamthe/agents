@@ -21,9 +21,9 @@ from __future__ import print_function
 
 import tensorflow as tf
 from tf_agents.agents.td3 import td3_agent
-from tf_agents.environments import time_step as ts
 from tf_agents.networks import network
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step as ts
 from tf_agents.utils import common
 from tf_agents.utils import test_utils
 
@@ -147,24 +147,23 @@ class TD3AgentTest(test_utils.TestCase):
     self.assertAllClose(loss_, expected_loss)
 
   def testActorLoss(self):
-    with tf.compat.v2.summary.record_if(False):
-      agent = td3_agent.Td3Agent(
-          self._time_step_spec,
-          self._action_spec,
-          critic_network=self._critic_net,
-          actor_network=self._unbounded_actor_net,
-          actor_optimizer=None,
-          critic_optimizer=None)
+    agent = td3_agent.Td3Agent(
+        self._time_step_spec,
+        self._action_spec,
+        critic_network=self._critic_net,
+        actor_network=self._unbounded_actor_net,
+        actor_optimizer=None,
+        critic_optimizer=None)
 
-      observations = [tf.constant([[1, 2], [3, 4]], dtype=tf.float32)]
-      time_steps = ts.restart(observations, batch_size=2)
+    observations = [tf.constant([[1, 2], [3, 4]], dtype=tf.float32)]
+    time_steps = ts.restart(observations, batch_size=2)
 
-      expected_loss = 4.0
-      loss = agent.actor_loss(time_steps)
+    expected_loss = 4.0
+    loss = agent.actor_loss(time_steps)
 
-      self.evaluate(tf.compat.v1.global_variables_initializer())
-      loss_ = self.evaluate(loss)
-      self.assertAllClose(loss_, expected_loss)
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    loss_ = self.evaluate(loss)
+    self.assertAllClose(loss_, expected_loss)
 
   def testPolicyProducesBoundedAction(self):
     agent = td3_agent.Td3Agent(

@@ -18,7 +18,9 @@ r"""Train and Eval DDPG.
 To run:
 
 ```bash
-tf_agents/agents/ddpg/examples/v1/train_eval -- \
+tensorboard --logdir $HOME/tmp/ddpg_v1/gym/HalfCheetah-v2/ --port 2223 &
+
+python tf_agents/agents/ddpg/examples/v1/train_eval.py \
   --root_dir=$HOME/tmp/ddpg_v1/gym/HalfCheetah-v2/ \
   --num_iterations=2000000 \
   --alsologtostderr
@@ -65,6 +67,7 @@ FLAGS = flags.FLAGS
 def train_eval(
     root_dir,
     env_name='HalfCheetah-v2',
+    eval_env_name=None,
     env_load_fn=suite_mujoco.load,
     num_iterations=2000000,
     actor_fc_layers=(400, 300),
@@ -130,7 +133,8 @@ def train_eval(
               [lambda: env_load_fn(env_name)] * num_parallel_environments))
     else:
       tf_env = tf_py_environment.TFPyEnvironment(env_load_fn(env_name))
-    eval_py_env = env_load_fn(env_name)
+    eval_env_name = eval_env_name or env_name
+    eval_py_env = env_load_fn(eval_env_name)
 
     actor_net = actor_network.ActorNetwork(
         tf_env.time_step_spec().observation,

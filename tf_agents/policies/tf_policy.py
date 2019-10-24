@@ -22,11 +22,13 @@ from __future__ import print_function
 import abc
 import tensorflow as tf
 import tensorflow_probability as tfp
-
-from tf_agents.environments import trajectory
-from tf_agents.policies import policy_step
+from tf_agents.distributions import reparameterized_sampling
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
+from tf_agents.utils import nest_utils
 
 tfd = tfp.distributions
 
@@ -115,6 +117,8 @@ class Base(tf.Module):
                policy_state_spec=(),
                info_spec=(),
                clip=True,
+               emit_log_probability=False,
+               automatic_state_reset=True,
                name=None):
     """Initialization of Base class.
 
@@ -130,26 +134,50 @@ class Base(tf.Module):
       clip: Whether to clip actions to spec before returning them.  Default
         True. Most policy-based algorithms (PCL, PPO, REINFORCE) use unclipped
         continuous actions for training.
+      emit_log_probability: Emit log-probabilities of actions, if supported. If
+        True, policy_step.info will have CommonFields.LOG_PROBABILITY set.
+        Please consult utility methods provided in policy_step for setting and
+        retrieving these. When working with custom policies, either provide a
+        dictionary info_spec or a namedtuple with the field 'log_probability'.
+      automatic_state_reset:  If `True`, then `get_initial_policy_state` is used
+        to clear state in `action()` and `distribution()` for for time steps
+        where `time_step.is_first()`.
       name: A name for this module. Defaults to the class name.
     """
     super(Base, self).__init__(name=name)
     common.assert_members_are_not_overridden(base_cls=Base, instance=self)
+    if not isinstance(time_step_spec, ts.TimeStep):
+      raise ValueError(
+          'The `time_step_spec` must be an instance of `TimeStep`, but is `{}`.'
+          .format(type(time_step_spec)))
 
     self._time_step_spec = time_step_spec
     self._action_spec = action_spec
     self._policy_state_spec = policy_state_spec
+    self._emit_log_probability = emit_log_probability
+    if emit_log_probability:
+      log_probability_spec = tensor_spec.BoundedTensorSpec(
+          shape=(), dtype=tf.float32, maximum=0, minimum=-float('inf'),
+          name='log_probability')
+      log_probability_spec = tf.nest.map_structure(
+          lambda _: log_probability_spec, action_spec)
+      info_spec = policy_step.set_log_probability(info_spec,
+                                                  log_probability_spec)
+
     self._info_spec = info_spec
     self._setup_specs()
     self._clip = clip
     self._action_fn = common.function_in_tf1()(self._action)
+    self._automatic_state_reset = automatic_state_reset
 
   def _setup_specs(self):
     self._policy_step_spec = policy_step.PolicyStep(
         action=self._action_spec,
         state=self._policy_state_spec,
         info=self._info_spec)
-    self._trajectory_spec = trajectory.from_transition(
-        self._time_step_spec, self._policy_step_spec, self._time_step_spec)
+    self._trajectory_spec = trajectory.from_transition(self._time_step_spec,
+                                                       self._policy_step_spec,
+                                                       self._time_step_spec)
 
   def variables(self):
     """Returns the list of Variables that belong to the policy."""
@@ -167,6 +195,25 @@ class Base(tf.Module):
       initialized Tensors.
     """
     return self._get_initial_state(batch_size=batch_size)
+
+  def _maybe_reset_state(self, time_step, policy_state):
+    if policy_state is ():  # pylint: disable=literal-comparison
+      return policy_state
+
+    batch_size = tf.compat.dimension_value(time_step.discount.shape[0])
+    if batch_size is None:
+      batch_size = tf.shape(time_step.discount)[0]
+
+    # Make sure we call this with a kwarg as it may be wrapped in tf.function
+    # which would expect a tensor if it was not a kwarg.
+    zero_state = self.get_initial_state(batch_size=batch_size)
+    condition = time_step.is_first()
+    # When experience is a sequence we only reset automatically for the first
+    # time_step in the sequence as we can't easily generalize how the policy is
+    # unrolled over the sequence.
+    if nest_utils.get_outer_rank(time_step, self._time_step_spec) > 1:
+      condition = time_step.is_first()[:, 0, ...]
+    return nest_utils.where(condition, zero_state, policy_state)
 
   def action(self, time_step, policy_state=(), seed=None):
     """Generates next action given the time_step and policy_state.
@@ -188,8 +235,8 @@ class Base(tf.Module):
     """
     if self._enable_functions and getattr(self, '_action_fn', None) is None:
       raise RuntimeError(
-          'Cannot find _action_fn.  Did %s.__init__ call super?'
-          % type(self).__name__)
+          'Cannot find _action_fn.  Did %s.__init__ call super?' %
+          type(self).__name__)
     if self._enable_functions:
       action_fn = self._action_fn
     else:
@@ -197,8 +244,10 @@ class Base(tf.Module):
 
     tf.nest.assert_same_structure(time_step, self._time_step_spec)
     tf.nest.assert_same_structure(policy_state, self._policy_state_spec)
-    step = action_fn(
-        time_step=time_step, policy_state=policy_state, seed=seed)
+
+    if self._automatic_state_reset:
+      policy_state = self._maybe_reset_state(time_step, policy_state)
+    step = action_fn(time_step=time_step, policy_state=policy_state, seed=seed)
 
     def clip_action(action, action_spec):
       if isinstance(action_spec, tensor_spec.BoundedTensorSpec):
@@ -215,8 +264,8 @@ class Base(tf.Module):
     def compare_to_spec(value, spec):
       return value.dtype.is_compatible_with(spec.dtype)
 
-    compatibility = tf.nest.flatten(tf.nest.map_structure(
-        compare_to_spec, step.action, self.action_spec))
+    compatibility = tf.nest.flatten(
+        tf.nest.map_structure(compare_to_spec, step.action, self.action_spec))
 
     if not all(compatibility):
       get_dtype = lambda x: x.dtype
@@ -246,7 +295,17 @@ class Base(tf.Module):
     """
     tf.nest.assert_same_structure(time_step, self._time_step_spec)
     tf.nest.assert_same_structure(policy_state, self._policy_state_spec)
+    if self._automatic_state_reset:
+      policy_state = self._maybe_reset_state(time_step, policy_state)
     step = self._distribution(time_step=time_step, policy_state=policy_state)
+    if self.emit_log_probability:
+      # This here is set only for compatibility with info_spec in constructor.
+      info = policy_step.set_log_probability(
+          step.info,
+          tf.nest.map_structure(
+              lambda _: tf.constant(0., dtype=tf.float32),
+              policy_step.get_log_probability(self._info_spec)))
+      step = step._replace(info=info)
     tf.nest.assert_same_structure(step, self._policy_step_spec)
     return step
 
@@ -273,6 +332,11 @@ class Base(tf.Module):
           sort_variables_by_name=sort_variables_by_name)
     else:
       return tf.no_op()
+
+  @property
+  def emit_log_probability(self):
+    """Whether this policy instance emits log probabilities or not."""
+    return self._emit_log_probability
 
   @property
   def time_step_spec(self):
@@ -367,9 +431,21 @@ class Base(tf.Module):
     """
     seed_stream = tfd.SeedStream(seed=seed, salt='ppo_policy')
     distribution_step = self._distribution(time_step, policy_state)
-    actions = tf.nest.map_structure(lambda d: d.sample(seed=seed_stream()),
-                                    distribution_step.action)
-    return distribution_step._replace(action=actions)
+    actions = tf.nest.map_structure(
+        lambda d: reparameterized_sampling.sample(d, seed=seed_stream()),
+        distribution_step.action)
+    info = distribution_step.info
+    if self.emit_log_probability:
+      try:
+        log_probability = tf.nest.map_structure(lambda a, d: d.log_prob(a),
+                                                actions,
+                                                distribution_step.action)
+        info = policy_step.set_log_probability(info, log_probability)
+      except:
+        raise TypeError('%s does not support emitting log-probabilities.' %
+                        type(self).__name__)
+
+    return distribution_step._replace(action=actions, info=info)
 
   ## Subclasses MUST implement these.
 

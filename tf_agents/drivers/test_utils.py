@@ -24,13 +24,13 @@ import tensorflow as tf
 
 from tf_agents import specs
 from tf_agents.environments import py_environment
-from tf_agents.environments import time_step as ts
-from tf_agents.environments import trajectory
-from tf_agents.policies import policy_step
 from tf_agents.policies import py_policy
 from tf_agents.policies import tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 
 
@@ -123,12 +123,11 @@ class TFPolicyMock(tf_policy.Base):
     del seed
 
     # Reset the policy for batch indices that have restarted episode.
-    policy_state = tf.where(time_step.is_first(),
-                            self._initial_policy_state,
-                            policy_state)
+    policy_state = tf.compat.v1.where(time_step.is_first(),
+                                      self._initial_policy_state, policy_state)
 
     # Take actions 1 and 2 alternating.
-    action = tf.floormod(policy_state, 2) + 1
+    action = tf.math.floormod(policy_state, 2) + 1
     new_policy_state = policy_state + tf.constant(
         1, shape=self._batch_shape, dtype=tf.int32)
     policy_info = action * 2
@@ -194,6 +193,26 @@ class NumStepsObserver(object):
         input_tensor=tf.cast(~traj.is_boundary(), dtype=tf.int32))
     with tf.control_dependencies([self._num_steps.assign_add(num_steps)]):
       return tf.nest.map_structure(tf.identity, traj)
+
+
+class NumStepsTransitionObserver(object):
+  """Class to count number of steps run by an observer."""
+
+  def __init__(self, variable_scope='num_steps_step_observer'):
+    with tf.compat.v1.variable_scope(variable_scope):
+      self._num_steps = common.create_variable(
+          'num_steps', 0, shape=[], dtype=tf.int32)
+
+  @property
+  def num_steps(self):
+    return self._num_steps
+
+  def __call__(self, transition):
+    _, _, next_time_step = transition
+    num_steps = tf.reduce_sum(
+        input_tensor=tf.cast(~next_time_step.is_first(), dtype=tf.int32))
+    with tf.control_dependencies([self._num_steps.assign_add(num_steps)]):
+      return tf.nest.map_structure(tf.identity, transition)
 
 
 class NumEpisodesObserver(object):

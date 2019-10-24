@@ -29,8 +29,8 @@ import tensorflow as tf
 
 from tf_agents.environments import parallel_py_environment
 from tf_agents.environments import random_py_environment
-from tf_agents.environments import time_step as ts
 from tf_agents.specs import array_spec
+from tf_agents.trajectories import time_step as ts
 
 
 class SlowStartingEnvironment(random_py_environment.RandomPyEnvironment):
@@ -179,6 +179,19 @@ class ParallelPyEnvironmentTest(tf.test.TestCase):
     for nested_action in unstacked_actions:
       self.assertAllEqual(action_spec.shape, nested_action.action.shape)
       self.assertEqual(13.0, nested_action.other_var)
+    env.close()
+
+  def test_seedable(self):
+    seeds = [0, 1]
+    env = self._make_parallel_py_environment()
+    env.seed(seeds)
+    self.assertEqual(
+        np.random.RandomState(0).get_state()[1][-1],
+        env._envs[0]._rng.get_state()[1][-1])
+
+    self.assertEqual(
+        np.random.RandomState(1).get_state()[1][-1],
+        env._envs[1]._rng.get_state()[1][-1])
     env.close()
 
 

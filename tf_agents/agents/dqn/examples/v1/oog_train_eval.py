@@ -23,8 +23,10 @@ to easily feed in data to train on.
 To run:
 
 ```bash
-tf_agents/agents/dqn/examples/oog_train_eval \
-  --root_dir=$HOME/tmp/dqn/gym/cart-pole/ \
+tensorboard --logdir $HOME/tmp/dqn_v1/gym/CartPole-v0/ --port 2223 &
+
+python tf_agents/agents/dqn/examples/v1/oog_train_eval.py \
+  --root_dir=$HOME/tmp/dqn_v1/gym/CartPole-v0/ \
   --alsologtostderr
 ```
 """
@@ -44,8 +46,6 @@ import tensorflow as tf
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.environments import batched_py_environment
 from tf_agents.environments import suite_gym
-from tf_agents.environments import time_step as ts
-from tf_agents.environments import trajectory
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import py_metrics
 from tf_agents.networks import q_network
@@ -53,6 +53,8 @@ from tf_agents.policies import py_tf_policy
 from tf_agents.policies import random_py_policy
 from tf_agents.replay_buffers import py_uniform_replay_buffer
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
@@ -89,6 +91,7 @@ def train_eval(
     train_steps_per_iteration=1,
     batch_size=64,
     learning_rate=1e-3,
+    n_step_update=1,
     gamma=0.99,
     reward_scale_factor=1.0,
     gradient_clipping=None,
@@ -140,10 +143,11 @@ def train_eval(
       action_spec,
       q_network=q_net,
       epsilon_greedy=epsilon_greedy,
+      n_step_update=n_step_update,
       target_update_tau=target_update_tau,
       target_update_period=target_update_period,
       optimizer=tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate),
-      td_errors_loss_fn=dqn_agent.element_wise_squared_loss,
+      td_errors_loss_fn=common.element_wise_squared_loss,
       gamma=gamma,
       reward_scale_factor=reward_scale_factor,
       gradient_clipping=gradient_clipping,
@@ -179,7 +183,8 @@ def train_eval(
       policy=agent.policy,
       global_step=global_step)
 
-  ds = replay_buffer.as_dataset(sample_batch_size=batch_size, num_steps=2)
+  ds = replay_buffer.as_dataset(
+      sample_batch_size=batch_size, num_steps=n_step_update + 1)
   ds = ds.prefetch(4)
   itr = tf.compat.v1.data.make_initializable_iterator(ds)
 
@@ -203,7 +208,7 @@ def train_eval(
     session.run(train_summary_writer.init())
     session.run(eval_summary_writer.init())
 
-    # Compute inital evaluation metrics.
+    # Compute initial evaluation metrics.
     global_step_val = global_step_call()
     metric_utils.compute_summaries(
         eval_metrics,

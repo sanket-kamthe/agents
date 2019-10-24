@@ -20,15 +20,18 @@ from __future__ import division
 from __future__ import print_function
 
 from absl.testing import parameterized
+from absl.testing.absltest import mock
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 from tf_agents.agents.reinforce import reinforce_agent
-from tf_agents.environments import time_step as ts
-from tf_agents.environments import trajectory
 from tf_agents.networks import actor_distribution_rnn_network
 from tf_agents.networks import network
+from tf_agents.networks import utils as network_utils
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step as ts
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import common
 
 from tensorflow.python.util import nest  # pylint:disable=g-direct-tensorflow-import  # TF internal
@@ -84,6 +87,28 @@ class DummyActorNet(network.Network):
     return distribution, network_state
 
 
+class DummyValueNet(network.Network):
+
+  def __init__(self, observation_spec, name=None, outer_rank=1):
+    super(DummyValueNet, self).__init__(observation_spec, (), 'DummyValueNet')
+    self._outer_rank = outer_rank
+    self._layers.append(
+        tf.keras.layers.Dense(
+            1,
+            kernel_initializer=tf.compat.v1.initializers.constant([2, 1]),
+            bias_initializer=tf.compat.v1.initializers.constant([5])))
+
+  def call(self, inputs, step_type=None, network_state=()):
+    del step_type
+    hidden_state = tf.cast(tf.nest.flatten(inputs), tf.float32)[0]
+    batch_squash = network_utils.BatchSquash(self._outer_rank)
+    hidden_state = batch_squash.flatten(hidden_state)
+    for layer in self.layers:
+      hidden_state = layer(hidden_state)
+    value_pred = tf.squeeze(batch_squash.unflatten(hidden_state), axis=-1)
+    return value_pred, network_state
+
+
 class ReinforceAgentTest(tf.test.TestCase, parameterized.TestCase):
 
   def setUp(self):
@@ -99,6 +124,17 @@ class ReinforceAgentTest(tf.test.TestCase, parameterized.TestCase):
         self._action_spec,
         actor_network=DummyActorNet(
             self._obs_spec, self._action_spec, unbounded_actions=False),
+        optimizer=None,
+    )
+
+  def testCreateAgentWithValueNet(self):
+    reinforce_agent.ReinforceAgent(
+        self._time_step_spec,
+        self._action_spec,
+        actor_network=DummyActorNet(
+            self._obs_spec, self._action_spec, unbounded_actions=False),
+        value_network=DummyValueNet(self._obs_spec),
+        value_estimation_loss_coef=0.5,
         optimizer=None,
     )
 
@@ -120,7 +156,38 @@ class ReinforceAgentTest(tf.test.TestCase, parameterized.TestCase):
 
     expected_loss = 10.983667373657227
     loss = agent.policy_gradient_loss(
-        actions_distribution, actions, time_steps.is_last(), returns)
+        actions_distribution, actions, time_steps.is_last(), returns, 1)
+
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    loss_ = self.evaluate(loss)
+    self.assertAllClose(loss_, expected_loss)
+
+  def testPolicyGradientLossMultipleEpisodes(self):
+    agent = reinforce_agent.ReinforceAgent(
+        self._time_step_spec,
+        self._action_spec,
+        actor_network=DummyActorNet(
+            self._obs_spec, self._action_spec, unbounded_actions=True),
+        optimizer=None,
+    )
+
+    step_type = tf.constant(
+        [ts.StepType.FIRST, ts.StepType.LAST, ts.StepType.FIRST,
+         ts.StepType.LAST])
+    reward = tf.constant([0, 0, 0, 0], dtype=tf.float32)
+    discount = tf.constant([1, 1, 1, 1], dtype=tf.float32)
+    observations = tf.constant(
+        [[1, 2], [1, 2], [1, 2], [1, 2]], dtype=tf.float32)
+    time_steps = ts.TimeStep(step_type, reward, discount, observations)
+
+    actions = tf.constant([[0], [1], [2], [3]], dtype=tf.float32)
+    actions_distribution = agent.collect_policy.distribution(
+        time_steps).action
+    returns = tf.constant([1.9, 1.9, 1.0, 1.0], dtype=tf.float32)
+
+    expected_loss = 5.140229225158691
+    loss = agent.policy_gradient_loss(
+        actions_distribution, actions, time_steps.is_last(), returns, 2)
 
     self.evaluate(tf.compat.v1.global_variables_initializer())
     loss_ = self.evaluate(loss)
@@ -141,6 +208,31 @@ class ReinforceAgentTest(tf.test.TestCase, parameterized.TestCase):
         distribution, action_spec, weights)
     self.assertAlmostEqual(self.evaluate(actual), self.evaluate(expected),
                            places=4)
+
+  def testValueEstimationLoss(self):
+    agent = reinforce_agent.ReinforceAgent(
+        self._time_step_spec,
+        self._action_spec,
+        actor_network=DummyActorNet(
+            self._obs_spec, self._action_spec, unbounded_actions=False),
+        value_network=DummyValueNet(self._obs_spec),
+        value_estimation_loss_coef=0.5,
+        optimizer=None,
+    )
+
+    observations = tf.constant([[1, 2], [3, 4]], dtype=tf.float32)
+    time_steps = ts.restart(observations, batch_size=2)
+    returns = tf.constant([1.9, 1.0], dtype=tf.float32)
+    value_preds, _ = agent._value_network(time_steps.observation,
+                                          time_steps.step_type)
+
+    expected_loss = 123.20500
+    loss = agent.value_estimation_loss(
+        value_preds, returns, 1)
+
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    loss_ = self.evaluate(loss)
+    self.assertAllClose(loss_, expected_loss)
 
   def testPolicy(self):
     agent = reinforce_agent.ReinforceAgent(
@@ -184,50 +276,85 @@ class ReinforceAgentTest(tf.test.TestCase, parameterized.TestCase):
       self.assertEqual(initial_state, ())
 
   def testTrainWithRnn(self):
-    with tf.compat.v2.summary.record_if(False):
-      actor_net = actor_distribution_rnn_network.ActorDistributionRnnNetwork(
-          self._obs_spec,
-          self._action_spec,
-          input_fc_layer_params=None,
-          output_fc_layer_params=None,
-          conv_layer_params=None,
-          lstm_size=(40,))
+    actor_net = actor_distribution_rnn_network.ActorDistributionRnnNetwork(
+        self._obs_spec,
+        self._action_spec,
+        input_fc_layer_params=None,
+        output_fc_layer_params=None,
+        conv_layer_params=None,
+        lstm_size=(40,))
 
-      counter = common.create_variable('test_train_counter')
-      agent = reinforce_agent.ReinforceAgent(
-          self._time_step_spec,
-          self._action_spec,
-          actor_network=actor_net,
-          optimizer=tf.compat.v1.train.AdamOptimizer(0.001),
-          train_step_counter=counter
-      )
+    counter = common.create_variable('test_train_counter')
+    agent = reinforce_agent.ReinforceAgent(
+        self._time_step_spec,
+        self._action_spec,
+        actor_network=actor_net,
+        optimizer=tf.compat.v1.train.AdamOptimizer(0.001),
+        train_step_counter=counter
+    )
 
-      batch_size = 5
-      observations = tf.constant(
-          [[[1, 2], [3, 4], [5, 6]]] * batch_size, dtype=tf.float32)
-      time_steps = ts.TimeStep(
-          step_type=tf.constant([[1] * 3] * batch_size, dtype=tf.int32),
-          reward=tf.constant([[1] * 3] * batch_size, dtype=tf.float32),
-          discount=tf.constant([[1] * 3] * batch_size, dtype=tf.float32),
-          observation=observations)
-      actions = tf.constant([[[0], [1], [1]]] * batch_size, dtype=tf.float32)
+    batch_size = 5
+    observations = tf.constant(
+        [[[1, 2], [3, 4], [5, 6]]] * batch_size, dtype=tf.float32)
+    time_steps = ts.TimeStep(
+        step_type=tf.constant([[1, 1, 2]] * batch_size, dtype=tf.int32),
+        reward=tf.constant([[1] * 3] * batch_size, dtype=tf.float32),
+        discount=tf.constant([[1] * 3] * batch_size, dtype=tf.float32),
+        observation=observations)
+    actions = tf.constant([[[0], [1], [1]]] * batch_size, dtype=tf.float32)
 
-      experience = trajectory.Trajectory(
-          time_steps.step_type, observations, actions, (),
-          time_steps.step_type, time_steps.reward, time_steps.discount)
+    experience = trajectory.Trajectory(
+        time_steps.step_type, observations, actions, (),
+        time_steps.step_type, time_steps.reward, time_steps.discount)
 
-      # Force variable creation.
-      agent.policy.variables()
+    # Force variable creation.
+    agent.policy.variables()
 
-      if tf.executing_eagerly():
-        loss = lambda: agent.train(experience)
-      else:
-        loss = agent.train(experience)
+    if tf.executing_eagerly():
+      loss = lambda: agent.train(experience)
+    else:
+      loss = agent.train(experience)
 
-      self.evaluate(tf.compat.v1.initialize_all_variables())
-      self.assertEqual(self.evaluate(counter), 0)
-      self.evaluate(loss)
-      self.assertEqual(self.evaluate(counter), 1)
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    self.assertEqual(self.evaluate(counter), 0)
+    self.evaluate(loss)
+    self.assertEqual(self.evaluate(counter), 1)
+
+  @parameterized.parameters(
+      (False,), (True,)
+  )
+  def testWithAdvantageFn(self, with_value_network):
+    advantage_fn = mock.Mock(
+        side_effect=lambda returns, _: returns)
+
+    value_network = (DummyValueNet(self._obs_spec) if with_value_network
+                     else None)
+    agent = reinforce_agent.ReinforceAgent(
+        self._time_step_spec,
+        self._action_spec,
+        actor_network=DummyActorNet(
+            self._obs_spec, self._action_spec, unbounded_actions=False),
+        value_network=value_network,
+        advantage_fn=advantage_fn,
+        optimizer=None,
+    )
+
+    step_type = tf.constant(
+        [[ts.StepType.FIRST, ts.StepType.LAST, ts.StepType.FIRST,
+          ts.StepType.LAST]])
+    reward = tf.constant([[0, 0, 0, 0]], dtype=tf.float32)
+    discount = tf.constant([[1, 1, 1, 1]], dtype=tf.float32)
+    observations = tf.constant(
+        [[[1, 2], [1, 2], [1, 2], [1, 2]]], dtype=tf.float32)
+    actions = tf.constant([[[0], [1], [2], [3]]], dtype=tf.float32)
+
+    experience = trajectory.Trajectory(
+        step_type, observations, actions, (),
+        step_type, reward, discount)
+
+    agent.total_loss(experience, reward, None)
+
+    advantage_fn.assert_called_once()
 
 
 if __name__ == '__main__':

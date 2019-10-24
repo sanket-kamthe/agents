@@ -59,6 +59,15 @@ class TestLoader(unittest.TestLoader):
     return True
 
 
+def load_test_list(filename):
+  testcases = [
+      x.rstrip() for x in open(filename, 'r').readlines()
+      if x]
+  # Remove comments and blanks after comments are removed.
+  testcases = [x.partition('#')[0].strip() for x in testcases]
+  return [x for x in testcases if x]
+
+
 class Test(TestCommandBase):
 
   def run_tests(self):
@@ -77,10 +86,10 @@ class Test(TestCommandBase):
       # https://bugs.python.org/issue15881.
       import multiprocessing as _  # pylint: disable=g-import-not-at-top
 
-      run_separately = [
-          x.rstrip() for x in open('test_individually.txt', 'r').readlines()
-          if x]
-      test_loader = TestLoader(blacklist=run_separately)
+      run_separately = load_test_list('test_individually.txt')
+      broken_tests = load_test_list('broken_tests.txt')
+
+      test_loader = TestLoader(blacklist=run_separately + broken_tests)
       test_suite = test_loader.discover('tf_agents', pattern='*_test.py')
       stderr = StderrWrapper()
       result = unittest.TextTestResult(stderr, descriptions=True, verbosity=2)
@@ -136,9 +145,9 @@ REQUIRED_PACKAGES = [
 
 TEST_REQUIRED_PACKAGES = [
     'atari_py == 0.1.7',
-    'gym == 0.10.11',
+    'gym == 0.12.5',
     'opencv-python >= 3.4.1.15',
-    'pybullet == 2.4.2',
+    'pybullet',
     'scipy == 1.1.0',
 ]
 
@@ -161,7 +170,7 @@ else:
   # Nightly releases use date-based versioning of the form
   # '0.0.1.dev20180305'
   project_name = 'tf-agents-nightly'
-  tfp_package_name = 'tfp-nightly==0.7.0.dev20190304'
+  tfp_package_name = 'tfp-nightly'
 
 REQUIRED_PACKAGES.append(tfp_package_name)
 
@@ -186,6 +195,7 @@ setup(
     version=version,
     description='TF-Agents: A Reinforcement Learning Library for TensorFlow',
     long_description=long_description,
+    long_description_content_type='text/markdown',
     author='Google LLC',
     author_email='no-reply@google.com',
     url='http://github.com/tensorflow/agents',

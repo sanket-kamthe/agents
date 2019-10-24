@@ -71,7 +71,7 @@ class PolicySaver(object):
   ```python
 
   my_policy = agent.collect_policy
-  saver = PolicySaver(policy, batch_size=None)
+  saver = PolicySaver(my_policy, batch_size=None)
 
   for i in range(...):
     agent.train(...)
@@ -117,7 +117,9 @@ class PolicySaver(object):
                policy,
                batch_size=None,
                use_nest_path_signatures=True,
-               seed=None):
+               seed=None,
+               train_step=None,
+               input_fn_and_spec=None):
     """Initialize PolicySaver for  TF policy `policy`.
 
     Args:
@@ -129,6 +131,15 @@ class PolicySaver(object):
         names.
       seed: Random seed for the `policy.action` call, if any (this should
         usually be `None`, except for testing).
+      train_step: Variable holding the train step for the policy. The value
+        saved will be set at the time `saver.save` is called. If not provided,
+        train_step defaults to -1.
+      input_fn_and_spec: A `(input_fn, tensor_spec)` tuple where input_fn is a
+        function that takes inputs according to tensor_spec and converts them
+        to the `(time_step, policy_state)` tuple that is used as the input to
+        the action_fn. When `input_fn_and_spec` is set, `tensor_spec` is the
+        input for the action signature. When `input_fn_and_spec is None`, the
+        action signature takes as input `(time_step, policy_state)`.
 
     Raises:
       TypeError: If `policy` is not an instance of TFPolicy.
@@ -137,12 +148,7 @@ class PolicySaver(object):
         `policy.time_step_spec`, `policy.action_spec`,
         `policy.policy_state_spec`, `policy.info_spec`.
       ValueError: If `batch_size` is not either `None` or a python integer > 0.
-      NotImplementedError: If created from TF1 with eager mode disabled.
     """
-    if not tf.executing_eagerly():
-      # TODO(b/129079730): Add support for TF1 using SavedModelBuilder.
-      raise NotImplementedError(
-          'Cannot create a PolicySaver in TF1 without eager mode enabled.')
     if not isinstance(policy, tf_policy.Base):
       raise TypeError('policy is not a TFPolicy.  Saw: %s' % type(policy))
     if (batch_size is not None and
@@ -159,11 +165,14 @@ class PolicySaver(object):
 
     # Make a shallow copy as we'll be making some changes in-place.
     policy = copy.copy(policy)
+    if train_step is None:
+      train_step = tf.constant(-1)
+    policy.train_step = train_step
 
     if batch_size is None:
       get_initial_state_fn = policy.get_initial_state
-      get_initial_state_input_specs = (
-          tf.TensorSpec(dtype=tf.int32, shape=(), name='batch_size'),)
+      get_initial_state_input_specs = (tf.TensorSpec(
+          dtype=tf.int32, shape=(), name='batch_size'),)
     else:
       get_initial_state_fn = functools.partial(
           policy.get_initial_state, batch_size=batch_size)
@@ -173,14 +182,16 @@ class PolicySaver(object):
 
     original_action_fn = policy.action
     if seed is not None:
+
       def action_fn(time_step, policy_state):
         return original_action_fn(time_step, policy_state, seed=seed)
     else:
       action_fn = original_action_fn
 
     # We call get_concrete_function() for its side effect.
-    get_initial_state_fn.get_concrete_function(
-        *get_initial_state_input_specs)
+    get_initial_state_fn.get_concrete_function(*get_initial_state_input_specs)
+
+    train_step_fn = common.function(lambda: train_step).get_concrete_function()
 
     action_fn = common.function()(action_fn)
 
@@ -211,45 +222,73 @@ class PolicySaver(object):
       _check_spec(policy_step_spec)
       _check_spec(policy_state_spec)
 
-    # We call get_concrete_function() for its side effect.
-    if batched_policy_state_spec:
-      # Store the signature with a required policy state spec
-      polymorphic_action_fn = action_fn
-      polymorphic_action_fn.get_concrete_function(
-          time_step=batched_time_step_spec,
-          policy_state=batched_policy_state_spec)
-    else:
-      # Create a polymorphic action_fn which you can call as
-      #  restored.action(time_step)
-      # or
-      #  restored.action(time_step, ())
-      # (without retracing the inner action twice)
+    if input_fn_and_spec is not None:
+      # Store a signature based on input_fn_and_spec
       @common.function()
-      def polymorphic_action_fn(
-          time_step, policy_state=batched_policy_state_spec):
-        return action_fn(time_step, policy_state)
-      polymorphic_action_fn.get_concrete_function(
-          time_step=batched_time_step_spec,
-          policy_state=batched_policy_state_spec)
-      polymorphic_action_fn.get_concrete_function(
-          time_step=batched_time_step_spec)
+      def polymorphic_action_fn(example):
+        action_inputs = input_fn_and_spec[0](example)
+        tf.nest.map_structure(
+            lambda spec, t: tf.Assert(spec.is_compatible_with(t[0]), [t]),
+            action_fn_input_spec, action_inputs)
+        return action_fn(*action_inputs)
+
+      batched_input_spec = tf.nest.map_structure(add_batch_dim,
+                                                 input_fn_and_spec[1])
+      # We call get_concrete_function() for its side effect.
+      polymorphic_action_fn.get_concrete_function(example=batched_input_spec)
+
+      action_input_spec = (input_fn_and_spec[1],)
+
+    else:
+      action_input_spec = action_fn_input_spec
+      if batched_policy_state_spec:
+        # Store the signature with a required policy state spec
+        polymorphic_action_fn = action_fn
+        polymorphic_action_fn.get_concrete_function(
+            time_step=batched_time_step_spec,
+            policy_state=batched_policy_state_spec)
+      else:
+        # Create a polymorphic action_fn which you can call as
+        #  restored.action(time_step)
+        # or
+        #  restored.action(time_step, ())
+        # (without retracing the inner action twice)
+        @common.function()
+        def polymorphic_action_fn(time_step,
+                                  policy_state=batched_policy_state_spec):
+          return action_fn(time_step, policy_state)
+
+        polymorphic_action_fn.get_concrete_function(
+            time_step=batched_time_step_spec,
+            policy_state=batched_policy_state_spec)
+        polymorphic_action_fn.get_concrete_function(
+            time_step=batched_time_step_spec)
 
     signatures = {
-        'action': _function_with_flat_signature(
-            polymorphic_action_fn,
-            input_specs=action_fn_input_spec,
-            output_spec=policy_step_spec,
-            include_batch_dimension=True,
-            batch_size=batch_size),
-        'get_initial_state': _function_with_flat_signature(
-            get_initial_state_fn,
-            input_specs=get_initial_state_input_specs,
-            output_spec=policy_state_spec,
-            include_batch_dimension=False),
+        'action':
+            _function_with_flat_signature(
+                polymorphic_action_fn,
+                input_specs=action_input_spec,
+                output_spec=policy_step_spec,
+                include_batch_dimension=True,
+                batch_size=batch_size),
+        'get_initial_state':
+            _function_with_flat_signature(
+                get_initial_state_fn,
+                input_specs=get_initial_state_input_specs,
+                output_spec=policy_state_spec,
+                include_batch_dimension=False),
+        'get_train_step':
+            _function_with_flat_signature(
+                train_step_fn,
+                input_specs=(),
+                output_spec=train_step.dtype,
+                include_batch_dimension=False),
     }
 
     policy.action = polymorphic_action_fn
     policy.get_initial_state = get_initial_state_fn
+    policy.train_step = train_step_fn
 
     self._policy = policy
     self._signatures = signatures
@@ -280,6 +319,7 @@ def _function_with_flat_signature(function,
     A `tf.function` with the given input spec that returns a `dict` mapping
     output spec keys to corresponding output values.
   """
+
   def _with_batch(spec):
     if include_batch_dimension:
       return tf.TensorSpec(
@@ -289,8 +329,7 @@ def _function_with_flat_signature(function,
     else:
       return spec
 
-  flat_input_spec = [
-      _with_batch(spec) for spec in tf.nest.flatten(input_specs)]
+  flat_input_spec = [_with_batch(spec) for spec in tf.nest.flatten(input_specs)]
 
   def as_dict(outputs, output_spec):
     tf.nest.assert_same_structure(outputs, output_spec)
