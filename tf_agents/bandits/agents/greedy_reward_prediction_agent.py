@@ -30,6 +30,7 @@ from tf_agents.bandits.policies import greedy_reward_prediction_policy as greedy
 from tf_agents.utils import common
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
+from tf_agents.utils import training
 
 
 @gin.configurable
@@ -54,7 +55,7 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
       debug_summaries=False,
       summarize_grads_and_vars=False,
       enable_summaries=True,
-      expose_predicted_rewards=False,
+      emit_policy_info=(),
       train_step_counter=None,
       name=None):
     """Creates a Greedy Reward Network Prediction Agent.
@@ -84,8 +85,9 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
         gradients and network variable summaries are written during training.
       enable_summaries: A Python bool, default True. When False, all summaries
         (debug or otherwise) should not be written.
-      expose_predicted_rewards: (bool) Whether to expose the predicted rewards
-        in the policy info field under the name 'predicted_rewards'.
+      emit_policy_info: (tuple of strings) what side information we want to get
+        as part of the policy info. Allowed values can be found in
+        `policy_utilities.PolicyInfo`.
       train_step_counter: An optional `tf.Variable` to increment every time the
         train op is run.  Defaults to the `global_step`.
       name: Python str name of this agent. All variables in this module will
@@ -96,6 +98,7 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
       not a bounded scalar int32 spec with minimum 0.
     """
     tf.Module.__init__(self, name=name)
+    common.tf_agents_gauge.get_cell('TFABandit').set(True)
     self._observation_and_action_constraint_splitter = (
         observation_and_action_constraint_splitter)
     self._num_actions = bandit_utils.get_num_actions_from_tensor_spec(
@@ -109,7 +112,7 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
     policy = greedy_reward_policy.GreedyRewardPredictionPolicy(
         time_step_spec, action_spec, reward_network,
         observation_and_action_constraint_splitter,
-        expose_predicted_rewards=expose_predicted_rewards)
+        emit_policy_info=emit_policy_info)
 
     super(GreedyRewardPredictionAgent, self).__init__(
         time_step_spec,
@@ -129,7 +132,7 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
         experience.action, self._action_spec)
     observations, _ = nest_utils.flatten_multi_batched_nested_tensors(
         experience.observation, self._time_step_spec.observation)
-    if self._observation_and_action_constraint_splitter:
+    if self._observation_and_action_constraint_splitter is not None:
       observations, _ = self._observation_and_action_constraint_splitter(
           observations)
 
@@ -158,8 +161,8 @@ class GreedyRewardPredictionAgent(tf_agent.TFAgent):
       eager_utils.add_gradients_summaries(grads_and_vars,
                                           self.train_step_counter)
 
-    self._optimizer.apply_gradients(grads_and_vars,
-                                    global_step=self.train_step_counter)
+    training.apply_gradients(self._optimizer, grads_and_vars,
+                             global_step=self.train_step_counter)
 
     return loss_info
 

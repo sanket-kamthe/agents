@@ -41,6 +41,7 @@ from tf_agents.bandits.policies import neural_linucb_policy
 from tf_agents.utils import common
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
+from tf_agents.utils import training
 
 
 @gin.configurable
@@ -66,6 +67,7 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
                debug_summaries=False,
                summarize_grads_and_vars=False,
                train_step_counter=None,
+               emit_policy_info=(),
                emit_log_probability=False,
                dtype=tf.float64,
                name=None):
@@ -105,6 +107,9 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
         gradients and network variable summaries are written during training.
       train_step_counter: An optional `tf.Variable` to increment every time the
         train op is run.  Defaults to the `global_step`.
+      emit_policy_info: (tuple of strings) what side information we want to get
+        as part of the policy info. Allowed values can be found in
+        `policy_utilities.PolicyInfo`.
       emit_log_probability: Whether the NeuralLinUCBPolicy emits
         log-probabilities or not. Since the policy is deterministic, the
         probability is just 1.
@@ -116,11 +121,12 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
       ValueError if dtype is not one of `tf.float32` or `tf.float64`.
     """
     tf.Module.__init__(self, name=name)
+    common.tf_agents_gauge.get_cell('TFABandit').set(True)
     self._num_actions = bandit_utils.get_num_actions_from_tensor_spec(
         action_spec)
     self._observation_and_action_constraint_splitter = (
         observation_and_action_constraint_splitter)
-    if observation_and_action_constraint_splitter:
+    if observation_and_action_constraint_splitter is not None:
       context_shape = observation_and_action_constraint_splitter(
           time_step_spec.observation)[0].shape.as_list()
     else:
@@ -145,7 +151,7 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
         self._num_actions,
         kernel_initializer=tf.compat.v1.initializers.random_uniform(
             minval=-0.03, maxval=0.03),
-        bias_initializer=tf.compat.v1.initializers.constant(-0.2),
+        use_bias=False,
         activation=None,
         name='reward_layer')
 
@@ -157,12 +163,16 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
     self._error_loss_fn = error_loss_fn
     self._gradient_clipping = gradient_clipping
     train_step_counter = tf.compat.v1.train.get_or_create_global_step()
-    self._actions_from_reward_layer = tf.compat.v2.Variable(True, dtype=tf.bool)
+    # Whether the policy uses the reward layer to figure out optimal action.
+    # If False, LinUCB is used instead.
+    self._actions_from_reward_layer = tf.compat.v2.Variable(
+        True, dtype=tf.bool, name='is_action_from_reward_layer')
 
     for k in range(self._num_actions):
       self._cov_matrix_list.append(
           tf.compat.v2.Variable(
-              tf.eye(self._encoding_dim, dtype=dtype), name='a_' + str(k)))
+              tf.zeros([self._encoding_dim, self._encoding_dim], dtype=dtype),
+              name='a_' + str(k)))
       self._data_vector_list.append(
           tf.compat.v2.Variable(
               tf.zeros(self._encoding_dim, dtype=dtype), name='b_' + str(k)))
@@ -181,6 +191,7 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
         num_samples=self._num_samples_list,
         time_step_spec=time_step_spec,
         alpha=alpha,
+        emit_policy_info=emit_policy_info,
         emit_log_probability=emit_log_probability,
         observation_and_action_constraint_splitter=(
             observation_and_action_constraint_splitter))
@@ -322,8 +333,8 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
         eager_utils.add_gradients_summaries(grads_and_vars,
                                             self.train_step_counter)
 
-    self._optimizer.apply_gradients(grads_and_vars,
-                                    global_step=self.train_step_counter)
+    training.apply_gradients(self._optimizer, grads_and_vars,
+                             global_step=self.train_step_counter)
     return loss_info
 
   def compute_loss_using_linucb(self, observation, action, reward, weights):
@@ -372,6 +383,7 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
 
     loss_tensor = tf.cast(-1. * tf.reduce_sum(reward), dtype=tf.float32)
     loss_info = tf_agent.LossInfo(loss=loss_tensor, extra=())
+    self.train_step_counter.assign_add(1)
     return loss_info
 
   def _train(self, experience, weights=None):
@@ -405,15 +417,17 @@ class NeuralLinUCBAgent(tf_agent.TFAgent):
     observation, _ = nest_utils.flatten_multi_batched_nested_tensors(
         experience.observation, self._time_step_spec.observation)
 
-    if self._observation_and_action_constraint_splitter:
+    if self._observation_and_action_constraint_splitter is not None:
       observation, _ = self._observation_and_action_constraint_splitter(
           observation)
     observation = tf.cast(observation, self._dtype)
     reward = tf.cast(reward, self._dtype)
 
+    tf.compat.v1.assign(
+        self._actions_from_reward_layer,
+        tf.less(self._train_step_counter,
+                self._encoding_network_num_train_steps))
     # pylint: disable=g-long-lambda
-    self._actions_from_reward_layer = tf.less(
-        self._train_step_counter, self._encoding_network_num_train_steps)
     loss_info = tf.cond(
         self._actions_from_reward_layer,
         lambda: self.compute_loss_using_reward_layer(

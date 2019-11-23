@@ -359,10 +359,14 @@ class SacAgent(tf_agent.TFAgent):
         """Update target network."""
         critic_update_1 = common.soft_variables_update(
             self._critic_network_1.variables,
-            self._target_critic_network_1.variables, tau)
+            self._target_critic_network_1.variables,
+            tau,
+            tau_non_trainable=1.0)
         critic_update_2 = common.soft_variables_update(
             self._critic_network_2.variables,
-            self._target_critic_network_2.variables, tau)
+            self._target_critic_network_2.variables,
+            tau,
+            tau_non_trainable=1.0)
         return tf.group(critic_update_1, critic_update_2)
 
       return common.Periodically(update, period, 'update_targets')
@@ -437,6 +441,11 @@ class SacAgent(tf_agent.TFAgent):
       if weights is not None:
         critic_loss *= weights
 
+      if nest_utils.is_batched_nested_tensors(
+          time_steps, self.time_step_spec, num_outer_dims=2):
+        # Sum over the time dimension.
+        critic_loss = tf.reduce_sum(input_tensor=critic_loss, axis=1)
+
       # Take the mean across the batch.
       critic_loss = tf.reduce_mean(input_tensor=critic_loss)
 
@@ -479,6 +488,10 @@ class SacAgent(tf_agent.TFAgent):
                                                    training=False)
       target_q_values = tf.minimum(target_q_values1, target_q_values2)
       actor_loss = tf.exp(self._log_alpha) * log_pi - target_q_values
+      if nest_utils.is_batched_nested_tensors(
+          time_steps, self.time_step_spec, num_outer_dims=2):
+        # Sum over the time dimension.
+        actor_loss = tf.reduce_sum(input_tensor=actor_loss, axis=1)
       if weights is not None:
         actor_loss *= weights
       actor_loss = tf.reduce_mean(input_tensor=actor_loss)
@@ -535,6 +548,11 @@ class SacAgent(tf_agent.TFAgent):
       unused_actions, log_pi = self._actions_and_log_probs(time_steps)
       entropy_diff = tf.stop_gradient(-log_pi - self._target_entropy)
       alpha_loss = (self._log_alpha * entropy_diff)
+
+      if nest_utils.is_batched_nested_tensors(
+          time_steps, self.time_step_spec, num_outer_dims=2):
+        # Sum over the time dimension.
+        alpha_loss = tf.reduce_sum(input_tensor=alpha_loss, axis=1)
 
       if weights is not None:
         alpha_loss *= weights

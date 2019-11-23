@@ -33,6 +33,7 @@ import tensorflow as tf
 from tf_agents.agents import tf_agent
 from tf_agents.bandits.agents import utils as bandit_utils
 from tf_agents.bandits.policies import linear_thompson_sampling_policy as ts_policy
+from tf_agents.utils import common
 from tf_agents.utils import nest_utils
 
 
@@ -60,6 +61,7 @@ class LinearThompsonSamplingAgent(tf_agent.TFAgent):
                gamma=1.0,
                observation_and_action_constraint_splitter=None,
                dtype=tf.float32,
+               emit_policy_info=(),
                name=None):
     """Initialize an instance of `LinearThompsonSamplingAgent`.
 
@@ -78,17 +80,21 @@ class LinearThompsonSamplingAgent(tf_agent.TFAgent):
         observation and mask.
       dtype: The type of the parameters stored and updated by the agent. Should
         be one of `tf.float32` and `tf.float64`. Defaults to `tf.float32`.
+      emit_policy_info: (tuple of strings) what side information we want to get
+        as part of the policy info. Allowed values can be found in
+        `policy_utilities.PolicyInfo`.
       name: a name for this instance of `LinearThompsonSamplingAgent`.
 
     Raises:
       ValueError if dtype is not one of `tf.float32` or `tf.float64`.
     """
     tf.Module.__init__(self, name=name)
+    common.tf_agents_gauge.get_cell('TFABandit').set(True)
     self._num_actions = bandit_utils.get_num_actions_from_tensor_spec(
         action_spec)
     self._observation_and_action_constraint_splitter = (
         observation_and_action_constraint_splitter)
-    if observation_and_action_constraint_splitter:
+    if observation_and_action_constraint_splitter is not None:
       context_shape = observation_and_action_constraint_splitter(
           time_step_spec.observation)[0].shape.as_list()
     else:
@@ -120,7 +126,8 @@ class LinearThompsonSamplingAgent(tf_agent.TFAgent):
         self._weight_covariances,
         self._parameter_estimators,
         observation_and_action_constraint_splitter=(
-            observation_and_action_constraint_splitter))
+            observation_and_action_constraint_splitter),
+        emit_policy_info=emit_policy_info)
     super(LinearThompsonSamplingAgent, self).__init__(
         time_step_spec=time_step_spec,
         action_spec=policy.action_spec,
@@ -171,7 +178,7 @@ class LinearThompsonSamplingAgent(tf_agent.TFAgent):
         experience.action, self._action_spec)
     observation, _ = nest_utils.flatten_multi_batched_nested_tensors(
         experience.observation, self._time_step_spec.observation)
-    if self._observation_and_action_constraint_splitter:
+    if self._observation_and_action_constraint_splitter is not None:
       observation, _ = self._observation_and_action_constraint_splitter(
           observation)
     observation = tf.cast(observation, self._dtype)
