@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 from tf_agents.distributions import tanh_bijector_stable
 from tf_agents.utils import common
@@ -88,8 +88,8 @@ class SquashToSpecNormal(tfp.distributions.Distribution):
     self.input_distribution = distribution
 
     bijectors = [
-        tfp.bijectors.AffineScalar(
-            shift=self.action_means, scale=self.action_magnitudes),
+        tfp.bijectors.Shift(self.action_means)(
+            tfp.bijectors.Scale(self.action_magnitudes)),
         tanh_bijector_stable.Tanh()
     ]
     bijector_chain = tfp.bijectors.Chain(bijectors)
@@ -130,6 +130,15 @@ class SquashToSpecNormal(tfp.distributions.Distribution):
   def log_prob(self, value, name="log_prob"):
     """Computes log probability from the wrapped TransformedDistribution."""
     return self._squashed_distribution.log_prob(value, name)
+
+  def prob(self, value, name="prob"):
+    """Computes probability from the wrapped TransformedDistribution."""
+    return self._squashed_distribution.prob(value, name)
+
+  def stddev(self, name="stddev"):
+    """Compute stddev of the SquashToSpecNormal distribution."""
+    stddev = self.action_magnitudes * tf.tanh(self.input_distribution.stddev())
+    return stddev
 
   def mode(self, name="mode"):
     """Compute mean of the SquashToSpecNormal distribution."""

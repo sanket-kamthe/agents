@@ -16,6 +16,7 @@
 """Test for tf_agents.environments.wrappers."""
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import collections
@@ -31,8 +32,8 @@ import gym.spaces
 import numpy as np
 
 from tf_agents.environments import gym_wrapper
-from tf_agents.environments import py_environment
 from tf_agents.environments import random_py_environment
+from tf_agents.environments import test_envs
 from tf_agents.environments import wrappers
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
@@ -117,8 +118,8 @@ class TimeLimitWrapperTest(test_utils.TestCase):
     env = wrappers.TimeLimit(env, 2)
 
     env.reset()
-    env.step(0)
-    time_step = env.step(0)
+    env.step(np.array(0, dtype=np.int32))
+    time_step = env.step(np.array(0, dtype=np.int32))
 
     self.assertTrue(time_step.is_last())
     self.assertNotEqual(None, time_step.discount)
@@ -131,7 +132,7 @@ class TimeLimitWrapperTest(test_utils.TestCase):
 
     self.assertEqual(None, env.get_info())
     env.reset()
-    env.step(0)
+    env.step(np.array(0, dtype=np.int32))
     self.assertEqual({}, env.get_info())
 
   def test_automatic_reset(self):
@@ -140,19 +141,19 @@ class TimeLimitWrapperTest(test_utils.TestCase):
     env = wrappers.TimeLimit(env, 2)
 
     # Episode 1
-    first_time_step = env.step(0)
+    first_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(first_time_step.is_first())
-    mid_time_step = env.step(0)
+    mid_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(mid_time_step.is_mid())
-    last_time_step = env.step(0)
+    last_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(last_time_step.is_last())
 
     # Episode 2
-    first_time_step = env.step(0)
+    first_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(first_time_step.is_first())
-    mid_time_step = env.step(0)
+    mid_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(mid_time_step.is_mid())
-    last_time_step = env.step(0)
+    last_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(last_time_step.is_last())
 
   def test_duration_applied_after_episode_terminates_early(self):
@@ -161,19 +162,19 @@ class TimeLimitWrapperTest(test_utils.TestCase):
     env = wrappers.TimeLimit(env, 10000)
 
     # Episode 1 stepped until termination occurs.
-    time_step = env.step(1)
+    time_step = env.step(np.array(1, dtype=np.int32))
     while not time_step.is_last():
-      time_step = env.step(1)
+      time_step = env.step(np.array(1, dtype=np.int32))
 
     self.assertTrue(time_step.is_last())
     env._duration = 2
 
     # Episode 2 short duration hits step limit.
-    first_time_step = env.step(0)
+    first_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(first_time_step.is_first())
-    mid_time_step = env.step(0)
+    mid_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(mid_time_step.is_mid())
-    last_time_step = env.step(0)
+    last_time_step = env.step(np.array(0, dtype=np.int32))
     self.assertTrue(last_time_step.is_last())
 
 
@@ -245,6 +246,67 @@ class ActionRepeatWrapperTest(test_utils.TestCase):
     self.assertEqual([3], time_step.observation)
 
 
+class ObservationFilterWrapperTest(test_utils.TestCase):
+
+  def _get_mock_env_step(self):
+    mock_env = mock.MagicMock()
+    mock_env.observation_spec.side_effect = [
+        array_spec.BoundedArraySpec((3,), np.int32, -10, 10),
+        array_spec.BoundedArraySpec((3,), np.int32, -10, 10),
+        array_spec.BoundedArraySpec((3,), np.int32, -10, 10),
+    ]
+    mock_env.reset.side_effect = [ts.TimeStep(ts.StepType.MID, 5, 1, [3, 5, 2])]
+    mock_env.step.side_effect = [ts.TimeStep(ts.StepType.MID, 5, 1, [1, 2, 3])]
+    return mock_env
+
+  def test_filtered_obs_spec(self):
+    mock_env = self._get_mock_env_step()
+    env = wrappers.ObservationFilterWrapper(mock_env, [1])
+
+    self.assertEqual((1,), env.observation_spec().shape)
+
+  def test_obs_filtered_reset(self):
+    mock_env = self._get_mock_env_step()
+    env = wrappers.ObservationFilterWrapper(mock_env, [0])
+    time_step = env.reset()
+
+    self.assertLen(time_step.observation, 1)
+    self.assertEqual([3], time_step.observation)
+
+  def test_obs_filtered_step(self):
+    mock_env = self._get_mock_env_step()
+    env = wrappers.ObservationFilterWrapper(mock_env, [0, 2])
+    env.reset()
+    time_step = env.step(0)
+
+    self.assertLen(time_step.observation, 2)
+    self.assertAllEqual([1, 3], time_step.observation)
+
+  def test_checks_nested_obs(self):
+    mock_env = self._get_mock_env_step()
+    mock_env.observation_spec.side_effect = [
+        [array_spec.BoundedArraySpec((2,), np.int32, -10, 10),
+         array_spec.BoundedArraySpec((2,), np.int32, -10, 10)]
+    ]
+    with self.assertRaises(ValueError):
+      _ = wrappers.ObservationFilterWrapper(mock_env, [0])
+
+  def test_checks_multidim_idx(self):
+    mock_env = self._get_mock_env_step()
+    with self.assertRaises(ValueError):
+      _ = wrappers.ObservationFilterWrapper(mock_env, [[0]])
+
+  def test_checks_idx_provided(self):
+    mock_env = self._get_mock_env_step()
+    with self.assertRaises(ValueError):
+      _ = wrappers.ObservationFilterWrapper(mock_env, [])
+
+  def test_checks_idx_outofbounds(self):
+    mock_env = self._get_mock_env_step()
+    with self.assertRaises(ValueError):
+      _ = wrappers.ObservationFilterWrapper(mock_env, [5])
+
+
 class RunStatsWrapperTest(test_utils.TestCase):
 
   def test_episode_count(self):
@@ -258,9 +320,9 @@ class RunStatsWrapperTest(test_utils.TestCase):
 
     for episode_num in range(1, 4):
       while not time_step.is_last():
-        time_step = env.step(1)
+        time_step = env.step(np.array(1, dtype=np.int32))
       self.assertEqual(episode_num, env.episodes)
-      time_step = env.step(1)
+      time_step = env.step(np.array(1, dtype=np.int32))
 
   def test_episode_count_with_time_limit(self):
     cartpole_env = gym.make('CartPole-v1')
@@ -271,8 +333,8 @@ class RunStatsWrapperTest(test_utils.TestCase):
     env.reset()
     self.assertEqual(0, env.episodes)
 
-    env.step(0)
-    time_step = env.step(0)
+    env.step(np.array(0, dtype=np.int32))
+    time_step = env.step(np.array(0, dtype=np.int32))
 
     self.assertTrue(time_step.is_last())
     self.assertEqual(1, env.episodes)
@@ -290,9 +352,9 @@ class RunStatsWrapperTest(test_utils.TestCase):
     for _ in range(0, 4):
       while not time_step.is_last():
         self.assertEqual(steps, env.total_steps)
-        time_step = env.step(1)
+        time_step = env.step(np.array(1, dtype=np.int32))
         steps += 1
-      time_step = env.step(1)
+      time_step = env.step(np.array(1, dtype=np.int32))
 
   def test_resets_count(self):
     cartpole_env = gym.make('CartPole-v1')
@@ -307,8 +369,8 @@ class RunStatsWrapperTest(test_utils.TestCase):
     for _ in range(0, 4):
       while not time_step.is_last():
         self.assertEqual(resets, env.resets)
-        time_step = env.step(1)
-      time_step = env.step(1)
+        time_step = env.step(np.array(1, dtype=np.int32))
+      time_step = env.step(np.array(1, dtype=np.int32))
       resets += 1
 
 
@@ -833,19 +895,6 @@ class GoalReplayEnvWrapperTest(parameterized.TestCase):
     self.assertEqual(time_step.observation.keys(),
                      env.observation_spec().keys())
 
-  def test_not_implemented_functions(self):
-    """Wrapper contains functions which need to be implemented in child."""
-    obs_spec = collections.OrderedDict({
-        'obs1': array_spec.ArraySpec((1,), np.int32),
-        'obs2': array_spec.ArraySpec((2,), np.int32),
-    })
-    action_spec = array_spec.BoundedArraySpec((), np.int32, -10, 10)
-
-    env = random_py_environment.RandomPyEnvironment(
-        obs_spec, action_spec=action_spec)
-    with self.assertRaises(TypeError):
-      env = wrappers.GoalReplayEnvWrapper(env)
-
   def test_batch_env(self):
     """Test batched version of the environment."""
     obs_spec = collections.OrderedDict({
@@ -872,28 +921,6 @@ class GoalReplayEnvWrapperTest(parameterized.TestCase):
                      env.observation_spec().keys())
 
 
-class CountingEnv(py_environment.PyEnvironment):
-
-  def __init__(self):
-    self._count = np.array(0, dtype=np.int32)
-
-  def _reset(self):
-    self._count = np.array(0, dtype=np.int32)
-    return ts.restart(self._count.copy())
-
-  def observation_spec(self):
-    return array_spec.ArraySpec((), np.int32)
-
-  def action_spec(self):
-    return array_spec.ArraySpec((), np.int32)
-
-  def _step(self, action):
-    self._count += 1
-    if self._count < 4:
-      return ts.transition(self._count.copy(), 1)
-    return ts.termination(self._count.copy(), 1)
-
-
 class HistoryWrapperTest(test_utils.TestCase):
 
   def test_observation_spec_changed(self):
@@ -917,7 +944,7 @@ class HistoryWrapperTest(test_utils.TestCase):
                      history_env.observation_spec()['action'].shape)
 
   def test_observation_stacked(self):
-    env = CountingEnv()
+    env = test_envs.CountingEnv()
     history_env = wrappers.HistoryWrapper(env, 3)
     time_step = history_env.reset()
     self.assertEqual([0, 0, 0], time_step.observation.tolist())
@@ -932,7 +959,7 @@ class HistoryWrapperTest(test_utils.TestCase):
     self.assertEqual([1, 2, 3], time_step.observation.tolist())
 
   def test_observation_and_action_stacked(self):
-    env = CountingEnv()
+    env = test_envs.CountingEnv()
     history_env = wrappers.HistoryWrapper(env, 3, include_actions=True)
     time_step = history_env.reset()
     self.assertEqual([0, 0, 0], time_step.observation['observation'].tolist())
@@ -969,19 +996,19 @@ class PerformanceProfilerWrapperTest(test_utils.TestCase):
 
     # Resets are also profiled.
     s = pstats.Stats(env._profile)
-    self.assertGreater(s.total_calls, 0)
+    self.assertGreater(s.total_calls, 0)  # pytype: disable=attribute-error
 
     for _ in range(2):
-      env.step(1)
+      env.step(np.array(1, dtype=np.int32))
 
     self.assertIsNotNone(profile[0])
     previous_profile = profile[0]
 
     updated_s = pstats.Stats(profile[0])
-    self.assertGreater(updated_s.total_calls, s.total_calls)
+    self.assertGreater(updated_s.total_calls, s.total_calls)  # pytype: disable=attribute-error
 
     for _ in range(2):
-      env.step(1)
+      env.step(np.array(1, dtype=np.int32))
 
     self.assertIsNotNone(profile[0])
     # We saw a new profile.

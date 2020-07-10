@@ -19,11 +19,16 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
+
 from tf_agents.specs import array_spec
 from tf_agents.specs import tensor_spec
 from tf_agents.utils import nest_utils
+
+# We use this to build {Dict,Tuple,List}Wrappers for testing nesting code.
+from tensorflow.python.training.tracking import data_structures  # pylint: disable=g-direct-tensorflow-import  # TF internal
 
 
 class NestedTensorsTest(tf.test.TestCase):
@@ -256,6 +261,15 @@ class NestedTensorsTest(tf.test.TestCase):
     tensors = self.zeros_from_spec(specs, batch_size=2)
 
     is_batched = nest_utils.is_batched_nested_tensors(tensors, specs)
+    self.assertTrue(is_batched)
+
+  def testIsBatchedNestedTensorsAllowExtraFields(self):
+    shape = [2, 3]
+    specs = self.nest_spec(shape)
+    tensors = self.zeros_from_spec(specs, batch_size=2)
+    tensors['extra_field'] = tf.constant([1, 2, 3])
+    is_batched = nest_utils.is_batched_nested_tensors(
+        tensors, specs, allow_extra_fields=True)
     self.assertTrue(is_batched)
 
   def testIsBatchedNestedTensorsMixed(self):
@@ -501,6 +515,19 @@ class NestedTensorsTest(tf.test.TestCase):
     assert_shapes = lambda tensor: self.assertEqual(tensor.shape, batched_shape)
     tf.nest.map_structure(assert_shapes, stacked_tensor)
 
+  def testStackNestedTensorsAxis1(self):
+    shape = [5, 8]
+    stack_dim = 3
+    stacked_shape = [5, 3, 8]
+
+    specs = self.nest_spec(shape, include_sparse=False)
+    unstacked_tensors = [self.zeros_from_spec(specs)] * stack_dim
+    stacked_tensor = nest_utils.stack_nested_tensors(unstacked_tensors, axis=1)
+
+    tf.nest.assert_same_structure(specs, stacked_tensor)
+    assert_shapes = lambda tensor: self.assertEqual(tensor.shape, stacked_shape)
+    tf.nest.map_structure(assert_shapes, stacked_tensor)
+
   def testUnBatchedNestedTensors(self, include_sparse=False):
     shape = [2, 3]
 
@@ -618,6 +645,24 @@ class NestedArraysTest(tf.test.TestCase):
     assert_shapes = lambda a: self.assertEqual(a.shape, shape)
     tf.nest.map_structure(assert_shapes, unbatched_arrays)
 
+  def testUnstackNestedArraysIntoFlatItems(self):
+    shape = (5, 8)
+    batch_size = 3
+
+    specs = self.nest_spec(shape)
+    batched_arrays = self.zeros_from_spec(specs, outer_dims=[batch_size])
+    unbatched_flat_items = nest_utils.unstack_nested_arrays_into_flat_items(
+        batched_arrays)
+    self.assertEqual(batch_size, len(unbatched_flat_items))
+
+    for nested_array, flat_item in zip(
+        nest_utils.unstack_nested_arrays(batched_arrays), unbatched_flat_items):
+      self.assertAllEqual(flat_item, tf.nest.flatten(nested_array))
+      tf.nest.assert_same_structure(specs,
+                                    tf.nest.pack_sequence_as(specs, flat_item))
+    assert_shapes = lambda a: self.assertEqual(a.shape, shape)
+    tf.nest.map_structure(assert_shapes, unbatched_flat_items)
+
   def testUnstackNestedArray(self):
     shape = (5, 8)
     batch_size = 1
@@ -679,6 +724,131 @@ class NestedArraysTest(tf.test.TestCase):
 
     expected = (np.array([0, 1, 1, 0, 1]), np.array([1, 7, 8, 4, 10]))
     self.assertAllEqual(expected, result)
+
+  def testWhereDifferentRanks(self):
+    condition = tf.convert_to_tensor([True, False, False, True, False])
+    true_output = tf.nest.map_structure(
+        tf.convert_to_tensor,
+        (np.reshape(np.array([0] * 10),
+                    (5, 2)), np.reshape(np.arange(1, 11), (5, 2))))
+    false_output = tf.nest.map_structure(
+        tf.convert_to_tensor,
+        (np.reshape(np.array([1] * 10),
+                    (5, 2)), np.reshape(np.arange(12, 22), (5, 2))))
+
+    result = nest_utils.where(condition, true_output, false_output)
+    result = self.evaluate(result)
+
+    expected = (np.array([[0, 0], [1, 1], [1, 1], [0, 0], [1, 1]]),
+                np.array([[1, 2], [14, 15], [16, 17], [7, 8], [20, 21]]))
+    self.assertAllEqual(expected, result)
+
+  def testWhereSameRankDifferentDimension(self):
+    condition = tf.convert_to_tensor([True, False, True])
+    true_output = (tf.convert_to_tensor([1]), tf.convert_to_tensor([2]))
+    false_output = (tf.convert_to_tensor([3, 4, 5]),
+                    tf.convert_to_tensor([6, 7, 8]))
+
+    result = nest_utils.where(condition, true_output, false_output)
+    result = self.evaluate(result)
+
+    expected = (np.array([1, 4, 1]), np.array([2, 7, 2]))
+    self.assertAllEqual(expected, result)
+
+
+class PruneExtraKeysTest(tf.test.TestCase):
+
+  def testPruneExtraKeys(self):
+    self.assertEqual(nest_utils.prune_extra_keys({}, {'a': 1}), {})
+    self.assertEqual(nest_utils.prune_extra_keys(
+        {'a': 1}, {'a': 'a'}), {'a': 'a'})
+    self.assertEqual(
+        nest_utils.prune_extra_keys({'a': 1}, {'a': 'a', 'b': 2}), {'a': 'a'})
+    self.assertEqual(
+        nest_utils.prune_extra_keys([{'a': 1}], [{'a': 'a', 'b': 2}]),
+        [{'a': 'a'}])
+    self.assertEqual(
+        nest_utils.prune_extra_keys(
+            {'a': {'aa': 1, 'ab': 2}, 'b': {'ba': 1}},
+            {'a': {'aa': 'aa', 'ab': 'ab', 'ac': 'ac'},
+             'b': {'ba': 'ba', 'bb': 'bb'},
+             'c': 'c'}),
+        {'a': {'aa': 'aa', 'ab': 'ab'}, 'b': {'ba': 'ba'}})
+
+  def testInvalidWide(self):
+    self.assertEqual(nest_utils.prune_extra_keys(None, {'a': 1}), {'a': 1})
+    self.assertEqual(nest_utils.prune_extra_keys({'a': 1}, {}), {})
+    self.assertEqual(nest_utils.prune_extra_keys(
+        {'a': 1}, {'c': 'c'}), {'c': 'c'})
+    self.assertEqual(nest_utils.prune_extra_keys([], ['a']), ['a'])
+    self.assertEqual(
+        nest_utils.prune_extra_keys([{}, {}], [{'a': 1}]), [{'a': 1}])
+
+  def testNamedTuple(self):
+
+    class A(collections.namedtuple('A', ('a', 'b'))):
+      pass
+
+    self.assertEqual(
+        nest_utils.prune_extra_keys(
+            [A(a={'aa': 1}, b=3), {'c': 4}],
+            [A(a={'aa': 'aa', 'ab': 'ab'}, b='b'), {'c': 'c', 'd': 'd'}]),
+        [A(a={'aa': 'aa'}, b='b'), {'c': 'c'}])
+
+  def testSubtypesOfListAndDict(self):
+
+    class A(collections.namedtuple('A', ('a', 'b'))):
+      pass
+
+    # pylint: disable=invalid-name
+    DictWrapper = data_structures.wrap_or_unwrap
+    TupleWrapper = data_structures.wrap_or_unwrap
+    # pylint: enable=invalid-name
+
+    self.assertEqual(
+        nest_utils.prune_extra_keys(
+            [data_structures.ListWrapper([None, DictWrapper({'a': 3, 'b': 4})]),
+             None,
+             TupleWrapper((DictWrapper({'g': 5}),)),
+             TupleWrapper(A(None, DictWrapper({'h': 6}))),
+            ],
+            [['x', {'a': 'a', 'b': 'b', 'c': 'c'}],
+             'd',
+             ({'g': 'g', 'gg': 'gg'},),
+             A(None, {'h': 'h', 'hh': 'hh'}),
+            ]),
+        [data_structures.ListWrapper([
+            'x', DictWrapper({'a': 'a', 'b': 'b'})]),
+         'd',
+         TupleWrapper((DictWrapper({'g': 'g'}),)),
+         TupleWrapper(A(None, DictWrapper({'h': 'h'}),)),
+        ])
+
+  def testOrderedDict(self):
+    OD = collections.OrderedDict  # pylint: disable=invalid-name
+
+    self.assertEqual(
+        nest_utils.prune_extra_keys(
+            OD([('a', OD([('aa', 1), ('ab', 2)])),
+                ('b', OD([('ba', 1)]))]),
+            OD([('a', OD([('aa', 'aa'), ('ab', 'ab'), ('ac', 'ac')])),
+                ('b', OD([('ba', 'ba'), ('bb', 'bb')])),
+                ('c', 'c')])),
+        OD([('a', OD([('aa', 'aa'), ('ab', 'ab')])),
+            ('b', OD([('ba', 'ba')]))])
+    )
+
+
+class TileBatchTest(tf.test.TestCase):
+
+  def test_tile_batch(self):
+    t = tf.constant([[1., 2., 3.], [4., 5., 6.]])
+    t_tile_batched = nest_utils.tile_batch(t, 2)
+
+    expected_t_tile_batched = tf.constant(
+        [[1., 2., 3.], [1., 2., 3.], [4., 5., 6.], [4., 5., 6.]])
+    self.assertAllEqual(
+        self.evaluate(expected_t_tile_batched), self.evaluate(t_tile_batched))
 
 
 if __name__ == '__main__':

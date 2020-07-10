@@ -16,22 +16,30 @@
 """Converts TensorFlow Policies into Python Policies."""
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+from typing import Optional, Text
 from absl import logging
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.policies import py_policy
 from tf_agents.policies import tf_policy
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import common
 from tf_agents.utils import nest_utils
 from tf_agents.utils import session_utils
 
 
-class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
+class PyTFPolicy(py_policy.PyPolicy, session_utils.SessionUser):
   """Exposes a Python policy as wrapper over a TF Policy."""
+
+  _time_step = ...  # type: ts.TimeStep
+  _policy_state = ...  # type: types.NestedPlaceHolder
+  _action_step = ...  # type: policy_step.PolicyStep
 
   # TODO(damienv): currently, the initial policy state must be batched
   # if batch_size is given. Without losing too much generality, the initial
@@ -39,16 +47,19 @@ class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
   # In that case, the initial policy state could be given with no batch
   # dimension.
   # TODO(sfishman): Remove batch_size param entirely.
-  def __init__(self, policy, batch_size=None, seed=None):
+  def __init__(self,
+               policy: tf_policy.TFPolicy,
+               batch_size: Optional[int] = None,
+               seed: Optional[types.Seed] = None):
     """Initializes a new `PyTFPolicy`.
 
     Args:
-      policy: A TF Policy implementing `tf_policy.Base`.
+      policy: A TF Policy implementing `tf_policy.TFPolicy`.
       batch_size: (deprecated)
       seed: Seed to use if policy performs random actions (optional).
     """
-    if not isinstance(policy, tf_policy.Base):
-      logging.warning('Policy should implement tf_policy.Base')
+    if not isinstance(policy, tf_policy.TFPolicy):
+      logging.warning('Policy should implement tf_policy.TFPolicy')
 
     if batch_size is not None:
       logging.warning('In PyTFPolicy constructor, `batch_size` is deprecated, '
@@ -93,7 +104,9 @@ class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
       self._action_step = self._tf_policy.action(
           self._time_step, self._policy_state, seed=self._seed)
 
-  def initialize(self, batch_size, graph=None):
+  def initialize(self,
+                 batch_size: Optional[int],
+                 graph: Optional[tf.Graph] = None):
     if self._built:
       raise RuntimeError('PyTFPolicy can only be initialized once.')
 
@@ -105,7 +118,9 @@ class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
     common.initialize_uninitialized_variables(self.session, var_list)
     self._built = True
 
-  def save(self, policy_dir=None, graph=None):
+  def save(self,
+           policy_dir: Optional[Text] = None,
+           graph: Optional[tf.Graph] = None):
     if not self._built:
       raise RuntimeError('PyTFPolicy has not been initialized yet.')
 
@@ -120,7 +135,10 @@ class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
       with self.session.as_default():
         policy_checkpointer.save(global_step)
 
-  def restore(self, policy_dir, graph=None, assert_consumed=True):
+  def restore(self,
+              policy_dir: Text,
+              graph: Optional[tf.Graph] = None,
+              assert_consumed: bool = True):
     """Restores the policy from the checkpoint.
 
     Args:
@@ -197,7 +215,7 @@ class PyTFPolicy(py_policy.Base, session_utils.SessionUser):
       # update time_step.
       time_step = nest_utils.batch_nested_array(time_step)
 
-    tf.nest.assert_same_structure(self._time_step, time_step)
+    nest_utils.assert_same_structure(self._time_step, time_step)
     feed_dict = {self._time_step: time_step}
     if policy_state is not None:
       # Flatten policy_state to handle specs that are not hashable due to lists.

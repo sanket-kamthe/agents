@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.environments import bernoulli_py_environment
 
@@ -33,7 +33,7 @@ class BernoulliBanditPyEnvironmentTest(tf.test.TestCase):
     observation_step = env.reset()
     self.assertAllEqual(observation_step.observation.shape, [2, 1])
     reward_step = env.step([0, 1])
-    self.assertAllEqual(reward_step.reward.shape, [2])
+    self.assertAllEqual(len(reward_step.reward), 2)
 
   def test_out_of_bound_parameter(self):
     with self.assertRaisesRegexp(

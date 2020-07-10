@@ -19,18 +19,17 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
 from absl import logging
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import trajectory
 from tf_agents.utils import eager_utils
 from tf_agents.utils import example_encoding
 from tf_agents.utils import nest_utils
 
 from tensorflow.core.protobuf import struct_pb2  # pylint:disable=g-direct-tensorflow-import  # TF internal
-from tensorflow.python.saved_model import nested_structure_coder  # pylint:disable=g-direct-tensorflow-import  # TF internal
 
 # File extension used when saving data specs to file
 _SPEC_FILE_EXTENSION = '.spec'
@@ -44,9 +43,7 @@ def encode_spec_to_file(output_path, tensor_data_spec):
     tensor_data_spec: Nested list/tuple or dict of TensorSpecs, describing the
       shape of the non-batched Tensors.
   """
-  spec = tensor_spec.from_spec(tensor_data_spec)
-  signature_encoder = nested_structure_coder.StructureCoder()
-  spec_proto = signature_encoder.encode_structure(spec)
+  spec_proto = tensor_spec.to_proto(tensor_data_spec)
   with tf.io.TFRecordWriter(output_path) as writer:
     writer.write(spec_proto.SerializeToString())
 
@@ -58,11 +55,11 @@ def parse_encoded_spec_from_file(input_path):
     input_path: The path to the TFRecord file which contains the spec.
 
   Returns:
-    Trajectory spec.
+    `TensorSpec` nested structure parsed from the TFRecord file.
   Raises:
     IOError: File at input path does not exist.
   """
-  if not os.path.exists(input_path):
+  if not tf.io.gfile.exists(input_path):
     raise IOError('Could not find spec file at %s.' % input_path)
   dataset = tf.data.TFRecordDataset(input_path, buffer_size=1)
   dataset_iterator = eager_utils.dataset_iterator(dataset)
@@ -76,9 +73,7 @@ def parse_encoded_spec_from_file(input_path):
       signature_proto_string_value = sess.run(signature_proto_string)
     signature_proto = struct_pb2.StructuredValue.FromString(
         signature_proto_string_value)
-  signature_encoder = nested_structure_coder.StructureCoder()
-  spec = signature_encoder.decode_proto(signature_proto)
-  return spec
+  return tensor_spec.from_proto(signature_proto)
 
 
 class TFRecordObserver(object):
@@ -97,20 +92,26 @@ class TFRecordObserver(object):
     ...
     observers=[..., tfrecord_observer],
     num_steps=collect_steps_per_iteration).run()
+
+  *Note*: Depending on your driver you may have to do
+    `common.function(tfrecord_observer)` to handle the use of a callable with no
+    return within a `tf.group` operation.
   """
 
-  def __init__(self, output_path, tensor_data_spec):
+  def __init__(self, output_path, tensor_data_spec, py_mode=False):
     """Creates observer object.
 
     Args:
       output_path: The path to the TFRecords file.
       tensor_data_spec: Nested list/tuple or dict of TensorSpecs, describing the
         shape of the non-batched Tensors.
+      py_mode: Whether the observer is being used in a py_driver.
 
     Raises:
       ValueError: if the tensors and specs have incompatible dimensions or
       shapes.
     """
+    self._py_mode = py_mode
     self._array_data_spec = tensor_spec.to_nest_array_spec(tensor_data_spec)
     self._encoder = example_encoding.get_example_serializer(
         self._array_data_spec)
@@ -122,15 +123,17 @@ class TFRecordObserver(object):
     spec_output_path = self.output_path + _SPEC_FILE_EXTENSION
     encode_spec_to_file(spec_output_path, tensor_data_spec)
 
-  def write(self, *tensor_data):
-    """Encodes and writes (to file) a batch of tensor data.
+  def write(self, *data):
+    """Encodes and writes (to file) a batch of data.
 
     Args:
-      *tensor_data: (unpacked) list/tuple of batched Tensors.
+      *data: (unpacked) list/tuple of batched np.arrays.
     """
-    data = [x.numpy() for x in tensor_data]
-    data = nest_utils.unbatch_nested_array(data)
-    structured_data = tf.nest.pack_sequence_as(self._array_data_spec, data)
+    if self._py_mode:
+      structured_data = data
+    else:
+      data = nest_utils.unbatch_nested_array(data)
+      structured_data = tf.nest.pack_sequence_as(self._array_data_spec, data)
     self._writer.write(self._encoder(structured_data))
 
   def flush(self):
@@ -146,12 +149,16 @@ class TFRecordObserver(object):
     self.close()
 
   def __call__(self, data):
-    """Wraps write() function into a TensorFlow op for eager execution."""
-    flat_data = tf.nest.flatten(data)
-    tf.py_function(self.write, flat_data, [], name='encoder_observer')
+    """If not in py_mode Wraps write() into a TF op for eager execution."""
+    if self._py_mode:
+      self.write(data)
+    else:
+      flat_data = tf.nest.flatten(data)
+      tf.numpy_function(self.write, flat_data, [], name='encoder_observer')
 
 
-def load_tfrecord_dataset(dataset_files, buffer_size=1000, as_experience=False):
+def load_tfrecord_dataset(dataset_files, buffer_size=1000, as_experience=False,
+                          as_trajectories=False, add_batch_dim=True):
   """Loads a TFRecord dataset from file, sequencing samples as Trajectories.
 
   Args:
@@ -161,6 +168,12 @@ def load_tfrecord_dataset(dataset_files, buffer_size=1000, as_experience=False):
       will be shaped as if they had been pulled from a replay buffer with
       `num_steps=2`. These samples can be fed directly to agent's `train`
       method.
+    as_trajectories: (bool) Remaps the data into trajectory objects. This should
+      be enabled when the resulting types must be trajectories as expected by
+      agents.
+    add_batch_dim: (bool) If True the data will have a batch dim of 1 to conform
+      with the expected tensor batch convention. Set to false if you want to
+      batch the data on your own.
 
   Returns:
     A dataset of type tf.data.Dataset. Samples follow the dataset's spec nested
@@ -194,6 +207,14 @@ def load_tfrecord_dataset(dataset_files, buffer_size=1000, as_experience=False):
     return nest_utils.batch_nested_tensors(sample)
 
   if as_experience:
-    return dataset.map(decode_fn).batch(2)
+    dataset = dataset.map(decode_fn).batch(2)
+  elif add_batch_dim:
+    dataset = dataset.map(decode_and_batch_fn)
   else:
-    return dataset.map(decode_and_batch_fn)
+    dataset = dataset.map(decode_fn)
+
+  if as_trajectories:
+    as_trajectories_fn = lambda sample: trajectory.Trajectory(*sample)
+    dataset = dataset.map(as_trajectories_fn)
+  return dataset
+

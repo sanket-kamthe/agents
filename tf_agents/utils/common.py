@@ -19,23 +19,36 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections as cs
+import contextlib
+import distutils.version
 import functools
+import importlib
 import os
 
 from absl import logging
-import distutils.version
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
 from tf_agents.utils import nest_utils
+from tf_agents.utils import object_identity
 
 # pylint:disable=g-direct-tensorflow-import
 from tensorflow.core.protobuf import struct_pb2  # TF internal
+from tensorflow.python import tf2 as tf2_checker  # TF internal
 from tensorflow.python.eager import monitoring  # TF internal
 from tensorflow.python.saved_model import nested_structure_coder  # TF internal
 # pylint:enable=g-direct-tensorflow-import
+
+try:
+  importlib.import_module('tf_agents.utils.allow_tf1')
+except ImportError:
+  _TF1_MODE_ALLOWED = False
+else:
+  _TF1_MODE_ALLOWED = True
+
 
 tf_agents_gauge = monitoring.BoolGauge('/tensorflow/agents/agents',
                                        'TF-Agents usage', 'method')
@@ -47,6 +60,18 @@ code to your main() method:
   tf.compat.v1.enable_resource_variables()
 For unit tests, subclass `tf_agents.utils.test_utils.TestCase`.
 """
+
+
+def check_tf1_allowed():
+  """Raises an error if running in TF1 (non-eager) mode and this is disabled."""
+  if _TF1_MODE_ALLOWED:
+    return
+  if not tf2_checker.enabled():
+    raise RuntimeError(
+        'You are using TF1 or running TF with eager mode disabled.  '
+        'TF-Agents no longer supports TF1 mode (except for a shrinking list of '
+        'internal whitelisted users).  If this negatively affects you, please '
+        'reach out to the TF-Agents team.  Otherwise please use TF2.')
 
 
 def resource_variables_enabled():
@@ -62,6 +87,33 @@ _IN_LEGACY_TF1 = (
 
 def in_legacy_tf1():
   return _IN_LEGACY_TF1
+
+
+def set_default_tf_function_parameters(*args, **kwargs):
+  """Generates a decorator that sets default parameters for `tf.function`.
+
+  Args:
+    *args: default arguments for the `tf.function`.
+    **kwargs: default keyword arguments for the `tf.function`.
+
+  Returns:
+    Function decorator with preconfigured defaults for `tf.function`.
+  """
+  def maybe_wrap(fn):
+    """Helper function."""
+    wrapped = [None]
+
+    @functools.wraps(fn)
+    def preconfigured_function(*fn_args, **fn_kwargs):
+      if tf.executing_eagerly():
+        return fn(*fn_args, **fn_kwargs)
+      if wrapped[0] is None:
+        wrapped[0] = function(*((fn,) + args), **kwargs)
+      return wrapped[0](*fn_args, **fn_kwargs)  # pylint: disable=not-callable
+
+    return preconfigured_function
+
+  return maybe_wrap
 
 
 def function(*args, **kwargs):
@@ -122,9 +174,11 @@ def function_in_tf1(*args, **kwargs):
     """Helper function."""
     # We're in TF1 mode and want to wrap in common.function to get autodeps.
     wrapped = [None]
+
     @functools.wraps(fn)
     def with_check_resource_vars(*fn_args, **fn_kwargs):
       """Helper function for calling common.function."""
+      check_tf1_allowed()
       if has_eager_been_enabled():
         # We're either in eager mode or in tf.function mode (no in-between); so
         # autodep-like behavior is already expected of fn.
@@ -132,9 +186,11 @@ def function_in_tf1(*args, **kwargs):
       if not resource_variables_enabled():
         raise RuntimeError(MISSING_RESOURCE_VARIABLES_ERROR)
       if wrapped[0] is None:
-        wrapped[0] = function(*args, **kwargs)(fn)
+        wrapped[0] = function(*((fn,) + args), **kwargs)
       return wrapped[0](*fn_args, **fn_kwargs)  # pylint: disable=not-callable
+
     return with_check_resource_vars
+
   return maybe_wrap
 
 
@@ -147,6 +203,7 @@ def create_variable(name,
                     initializer=None,
                     unique_name=True):
   """Create a variable."""
+  check_tf1_allowed()
   if has_eager_been_enabled():
     if initializer is None:
       if shape:
@@ -155,7 +212,7 @@ def create_variable(name,
         initial_value = tf.convert_to_tensor(initial_value, dtype=dtype)
     else:
       if callable(initializer):
-        initial_value = lambda: initializer(shape)
+        initial_value = lambda: initializer(shape, dtype)
       else:
         initial_value = initializer
     return tf.compat.v2.Variable(
@@ -256,7 +313,7 @@ def soft_variables_update(source_variables,
     # batch norm stats) do a regular assign, which will cause a sync and
     # broadcast from replica 0, so will have slower performance but will be
     # correct and not cause a failure.
-    if strategy is not None and v_t.trainable:
+    if tf.distribute.has_strategy() and v_t.trainable:
       # Assignment happens independently on each replica,
       # see b/140690837 #46.
       update = strategy.extended.update(v_t, update_fn, args=(v_s,))
@@ -611,7 +668,7 @@ def log_probability(distributions, actions, action_spec):
         input_tensor=single_log_prob,
         axis=reduce_dims)
 
-  tf.nest.assert_same_structure(distributions, actions)
+  nest_utils.assert_same_structure(distributions, actions)
   log_probs = [
       _compute_log_prob(dist, action)
       for (dist, action
@@ -929,6 +986,11 @@ class Checkpointer(object):
   def checkpoint_exists(self):
     return self._checkpoint_exists
 
+  @property
+  def manager(self):
+    """Returns the underlying tf.train.CheckpointManager."""
+    return self._manager
+
   def initialize_or_restore(self, session=None):
     """Initialize or restore graph (based on checkpoint if exists)."""
     self._load_status.initialize_or_restore(session)
@@ -971,12 +1033,18 @@ def replicate(tensor, outer_shape):
   if outer_ndims == 0:
     return tensor
 
+  # Calculate target shape of replicated tensor
+  target_shape = tf.concat([outer_shape, tf.shape(input=tensor)], axis=0)
+
+  # tf.tile expects `tensor` to be at least 1D
+  if tensor_ndims == 0:
+    tensor = tensor[None]
+
   # Replicate tensor "t" along the 1st dimension.
   tiled_tensor = tf.tile(tensor, [tf.reduce_prod(input_tensor=outer_shape)] +
                          [1] * (tensor_ndims - 1))
 
   # Reshape to match outer_shape.
-  target_shape = tf.concat([outer_shape, tf.shape(input=tensor)], axis=0)
   return tf.reshape(tiled_tensor, target_shape)
 
 
@@ -1107,6 +1175,30 @@ def load_spec(file_path):
   return signature_encoder.decode_proto(signature_proto)
 
 
+def extract_shared_variables(variables_1, variables_2):
+  """Separates shared variables from the given collections.
+
+  Args:
+    variables_1: An iterable of Variables
+    variables_2: An iterable of Variables
+
+  Returns:
+    A Tuple of ObjectIdentitySets described by the set operations
+
+    ```
+    (variables_1 - variables_2,
+     variables_2 - variables_1,
+     variables_1 & variables_2)
+    ```
+  """
+  var_refs1 = object_identity.ObjectIdentitySet(variables_1)
+  var_refs2 = object_identity.ObjectIdentitySet(variables_2)
+
+  shared_vars = var_refs1.intersection(var_refs2)
+  return (var_refs1.difference(shared_vars), var_refs2.difference(shared_vars),
+          shared_vars)
+
+
 def check_no_shared_variables(network_1, network_2):
   """Checks that there are no shared trainable variables in the two networks.
 
@@ -1168,11 +1260,132 @@ def check_matching_networks(network_1, network_2):
 
 def maybe_copy_target_network_with_checks(network, target_network=None,
                                           name='TargetNetwork'):
+  """Copies the network into target if None and checks for shared variables."""
   if target_network is None:
     target_network = network.copy(name=name)
     target_network.create_variables()
-    # Copy may have been shallow, and variable may inadvertently be shared
-    # between the target and original network.
-    check_no_shared_variables(network, target_network)
+  # Copy may have been shallow, and variables may inadvertently be shared
+  # between the target and the original networks. This would be an unusual
+  # setup, so we throw an error to protect users from accidentally doing so.
+  # If you explicitly want this to be enabled, please open a feature request
+  # with the team.
+  check_no_shared_variables(network, target_network)
   check_matching_networks(network, target_network)
   return target_network
+
+
+AggregatedLosses = cs.namedtuple(
+    'AggregatedLosses',
+    ['total_loss',  # Total loss = weighted + regularization
+     'weighted',  # Weighted sum of per_example_loss by sample_weight.
+     'regularization',  # Total of regularization losses.
+    ])
+
+
+def aggregate_losses(per_example_loss=None,
+                     sample_weight=None,
+                     global_batch_size=None,
+                     regularization_loss=None):
+  """Aggregates and scales per example loss and regularization losses.
+
+  If `global_batch_size` is given it would be used for scaling, otherwise it
+  would use the batch_dim of per_example_loss and number of replicas.
+
+  Args:
+    per_example_loss: Per-example loss [B] or [B, T, ...].
+    sample_weight: Optional weighting for each example, Tensor shaped [B] or
+      [B, T, ...], or a scalar float.
+    global_batch_size: Optional global batch size value. Defaults to (size of
+    first dimension of `losses`) * (number of replicas).
+    regularization_loss: Regularization loss.
+
+  Returns:
+    An AggregatedLosses named tuple with scalar losses to optimize.
+  """
+  total_loss, weighted_loss, reg_loss = None, None, None
+  if sample_weight is not None and not isinstance(sample_weight, tf.Tensor):
+    sample_weight = tf.convert_to_tensor(sample_weight, dtype=tf.float32)
+
+  # Compute loss that is scaled by global batch size.
+  if per_example_loss is not None:
+    loss_rank = per_example_loss.shape.rank
+    if sample_weight is not None:
+      weight_rank = sample_weight.shape.rank
+      # Expand `sample_weight` to be broadcastable to the shape of
+      # `per_example_loss`, to ensure that multiplication works properly.
+      if weight_rank > 0 and loss_rank > weight_rank:
+        for dim in range(weight_rank, loss_rank):
+          sample_weight = tf.expand_dims(sample_weight, dim)
+      per_example_loss = tf.math.multiply(per_example_loss, sample_weight)
+
+    if loss_rank is not None and loss_rank == 0:
+      err_msg = (
+          'Need to use a loss function that computes losses per sample, ex: '
+          'replace losses.mean_squared_error with tf.math.squared_difference. '
+          'Invalid value passed for `per_example_loss`. Expected a tensor '
+          'tensor with at least rank 1, received: {}'.format(per_example_loss))
+      if tf.distribute.has_strategy():
+        raise ValueError(err_msg)
+      else:
+        logging.warning(err_msg)
+        # Add extra dimension to prevent error in compute_average_loss.
+        per_example_loss = tf.expand_dims(per_example_loss, 0)
+    elif loss_rank > 1:
+      # If per_example_loss is shaped [B, T, ...], we need to compute the mean
+      # across the extra dimensions, ex. time, as well.
+      per_example_loss = tf.reduce_mean(per_example_loss, range(1, loss_rank))
+
+    global_batch_size = global_batch_size and tf.cast(global_batch_size,
+                                                      per_example_loss.dtype)
+    weighted_loss = tf.nn.compute_average_loss(
+        per_example_loss,
+        global_batch_size=global_batch_size)
+    total_loss = weighted_loss
+  # Add scaled regularization losses.
+  if regularization_loss is not None:
+    reg_loss = tf.nn.scale_regularization_loss(regularization_loss)
+    if total_loss is None:
+      total_loss = reg_loss
+    else:
+      total_loss += reg_loss
+  return AggregatedLosses(total_loss, weighted_loss, reg_loss)
+
+
+def summarize_scalar_dict(name_data, step, name_scope='Losses/'):
+  if name_data:
+    with tf.name_scope(name_scope):
+      for name, data in name_data.items():
+        if data is not None:
+          tf.compat.v2.summary.scalar(
+              name=name, data=data, step=step)
+
+
+@contextlib.contextmanager
+def soft_device_placement():
+  """Context manager for soft device placement, allowing summaries on CPU.
+
+  Eager and graph contexts have different default device placements. See
+  b/148408921 for details. This context manager should be used whenever using
+  summary writers contexts to make sure summaries work when executing on TPUs.
+
+  Yields:
+    Sets `tf.config.set_soft_device_placement(True)` within the context
+  """
+  original_setting = tf.config.get_soft_device_placement()
+  try:
+    tf.config.set_soft_device_placement(True)
+    yield
+  finally:
+    tf.config.set_soft_device_placement(original_setting)
+
+
+def deduped_network_variables(network, *args):
+  """Returns a list of variables in net1 that are not in any other nets.
+
+  Args:
+    network: A Keras network.
+    *args: other networks to check for duplicate variables.
+  """
+  other_vars = object_identity.ObjectIdentitySet(
+      [v for n in args for v in n.variables])  # pylint:disable=g-complex-comprehension
+  return [v for v in network.variables if v not in other_vars]

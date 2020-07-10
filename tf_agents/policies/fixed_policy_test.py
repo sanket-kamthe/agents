@@ -20,25 +20,11 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.policies import fixed_policy
-from tf_agents.policies import tf_policy
 from tf_agents.specs import tensor_spec
-from tf_agents.trajectories import policy_step
 from tf_agents.trajectories import time_step as ts
 from tf_agents.utils import test_utils
-
-
-class DistributionPolicy(tf_policy.Base):
-  """A policy which always returns the configured distribution."""
-
-  def __init__(self, distribution, time_step_spec, action_spec, name=None):
-    self._distribution_value = distribution
-    super(DistributionPolicy, self).__init__(
-        time_step_spec, action_spec, name=name)
-
-  def _distribution(self, time_step, policy_state):
-    return policy_step.PolicyStep(self._distribution_value, policy_state)
 
 
 class FixedPolicyTest(test_utils.TestCase):
@@ -83,10 +69,38 @@ class FixedPolicyTest(test_utils.TestCase):
     mode = distribution_step.action.mode()
 
     self.evaluate(tf.compat.v1.global_variables_initializer())
-    self.assertAllEqual(self.evaluate(action_step.action),
-                        [[self._fixed_action]] * batch_size)
-    self.assertAllEqual(self.evaluate(mode),
-                        [[self._fixed_action]] * batch_size)
+    self.assertAllEqual(
+        self.evaluate(action_step.action), [[self._fixed_action]] * batch_size)
+    self.assertAllEqual(
+        self.evaluate(mode), [[self._fixed_action]] * batch_size)
+
+  def testFixedPolicyBatchedOnNestedObservations(self):
+    batch_size = 2
+    observations = tf.constant([[1, 2], [3, 4]], dtype=tf.float32)
+    time_step = ts.restart(observations, batch_size=batch_size)
+    action_spec = (tensor_spec.TensorSpec(shape=(2,), dtype=tf.float32),
+                   (tensor_spec.TensorSpec(shape=(1,), dtype=tf.int64), {
+                       'dict': tensor_spec.TensorSpec(shape=(), dtype=tf.int32)
+                   }))
+    fixed_action = (np.array([100, 200],
+                             dtype=np.float32), (np.array([300],
+                                                          dtype=np.int64), {
+                                                              'dict': 400
+                                                          }))
+    policy = fixed_policy.FixedPolicy(fixed_action, self._time_step_spec,
+                                      action_spec)
+    action = policy.action(time_step).action
+    distribution_mode = tf.nest.map_structure(
+        lambda t: t.mode(),
+        policy.distribution(time_step).action)
+
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    expected = (tf.constant([[100, 200]] * batch_size, dtype=tf.float32),
+                (tf.constant([[300]] * batch_size, dtype=tf.int64), {
+                    'dict': tf.constant([400] * batch_size, dtype=tf.int32)
+                }))
+    tf.nest.map_structure(self.assertAllEqual, action, expected)
+    tf.nest.map_structure(self.assertAllEqual, distribution_mode, expected)
 
 
 if __name__ == '__main__':

@@ -17,34 +17,51 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 import numpy as np
 from tf_agents.drivers import driver
+from tf_agents.environments import py_environment
+from tf_agents.policies import py_policy
+from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
+
+from tf_agents.typing import types
 
 
 class PyDriver(driver.Driver):
   """A driver that runs a python policy in a python environment."""
 
-  def __init__(self,
-               env,
-               policy,
-               observers,
-               max_steps=None,
-               max_episodes=None):
+  def __init__(
+      self,
+      env: py_environment.PyEnvironment,
+      policy: py_policy.PyPolicy,
+      observers: Sequence[Callable[[trajectory.Trajectory], Any]],
+      transition_observers: Optional[Sequence[Callable[[types.Transition],
+                                                       Any]]] = None,
+      max_steps: Optional[types.Int] = None,
+      max_episodes: Optional[types.Int] = None):
     """A driver that runs a python policy in a python environment.
 
     Args:
       env: A py_environment.Base environment.
-      policy: A py_policy.Base policy.
+      policy: A py_policy.PyPolicy policy.
       observers: A list of observers that are notified after every step
         in the environment. Each observer is a callable(trajectory.Trajectory).
-      max_steps: Optional maximum number of steps for each run() call.
-        Also see below.  Default: 0.
-      max_episodes: Optional maximum number of episodes for each run() call.
-        At least one of max_steps or max_episodes must be provided. If both
-        are set, run() terminates when at least one of the conditions is
+      transition_observers: A list of observers that are updated after every
+        step in the environment. Each observer is a callable((TimeStep,
+        PolicyStep, NextTimeStep)). The transition is shaped just as
+        trajectories are for regular observers.
+      max_steps: Optional maximum number of steps for each run() call. For
+        batched or parallel environments, this is the maximum total number of
+        steps summed across all environments. Also see below.  Default: 0.
+      max_episodes: Optional maximum number of episodes for each run() call. For
+        batched or parallel environments, this is the maximum total number of
+        episodes summed across all environments. At least one of max_steps or
+        max_episodes must be provided. If both are set, run() terminates when at
+        least one of the conditions is
         satisfied.  Default: 0.
 
     Raises:
@@ -56,11 +73,15 @@ class PyDriver(driver.Driver):
       raise ValueError(
           'Either `max_steps` or `max_episodes` should be greater than 0.')
 
-    super(PyDriver, self).__init__(env, policy, observers)
+    super(PyDriver, self).__init__(env, policy, observers, transition_observers)
     self._max_steps = max_steps or np.inf
     self._max_episodes = max_episodes or np.inf
 
-  def run(self, time_step, policy_state=()):
+  def run(
+      self,
+      time_step: ts.TimeStep,
+      policy_state: types.NestedArray = ()
+  ) -> Tuple[ts.TimeStep, types.NestedArray]:
     """Run policy in environment given initial time_step and policy_state.
 
     Args:
@@ -77,6 +98,8 @@ class PyDriver(driver.Driver):
       next_time_step = self.env.step(action_step.action)
 
       traj = trajectory.from_transition(time_step, action_step, next_time_step)
+      for observer in self._transition_observers:
+        observer((time_step, action_step, next_time_step))
       for observer in self.observers:
         observer(traj)
 

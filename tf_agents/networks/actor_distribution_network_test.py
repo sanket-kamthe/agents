@@ -20,7 +20,7 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.networks import actor_distribution_network
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
@@ -52,6 +52,25 @@ class ActorDistributionNetworkTest(tf.test.TestCase, parameterized.TestCase):
     self.evaluate(tf.compat.v1.global_variables_initializer())
     self.assertEqual([1, 2], action_distributions[0].mode().shape.as_list())
     self.assertEqual([1, 3], action_distributions[1].mode().shape.as_list())
+
+  @test_util.run_in_graph_and_eager_modes()
+  def testBuildsScalarContinuousActionSpace(self):
+    observation_spec = tensor_spec.BoundedTensorSpec((8, 8, 3), tf.float32, 0,
+                                                     1)
+    time_step_spec = ts.time_step_spec(observation_spec)
+    time_step = tensor_spec.sample_spec_nest(time_step_spec, outer_dims=(1,))
+
+    action_spec = tensor_spec.BoundedTensorSpec((), tf.float32, 2, 3)
+
+    net = actor_distribution_network.ActorDistributionNetwork(
+        observation_spec,
+        action_spec
+    )
+
+    action_distributions, _ = net(time_step.observation, time_step.step_type,
+                                  ())
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    self.assertEqual([1], action_distributions.mode().shape.as_list())
 
   @test_util.run_in_graph_and_eager_modes()
   def testHandlesExtraOuterDims(self):
@@ -115,7 +134,6 @@ class ActorDistributionNetworkTest(tf.test.TestCase, parameterized.TestCase):
       ('TrainingTrue', True,),
       ('TrainingFalse', False))
   def testDropoutFCLayersWithConv(self, training):
-    tf.compat.v1.set_random_seed(0)
     observation_spec = tensor_spec.BoundedTensorSpec((8, 8, 3), tf.float32, 0,
                                                      1)
     time_step_spec = ts.time_step_spec(observation_spec)
@@ -129,21 +147,26 @@ class ActorDistributionNetworkTest(tf.test.TestCase, parameterized.TestCase):
         fc_layer_params=[5],
         dropout_layer_params=[0.5])
 
-    action_distributions1, _ = net(
-        time_step.observation, time_step.step_type, (), training=training)
-    action_distributions2, _ = net(
-        time_step.observation, time_step.step_type, (), training=training)
-    mode1 = action_distributions1.mode()
-    mode2 = action_distributions2.mode()
+    modes = []
+    num_modes = 10
+    for _ in range(num_modes):
+      action_distributions, _ = net(
+          time_step.observation, time_step.step_type, (), training=training)
+      modes.append(action_distributions.mode())
 
     self.evaluate(tf.compat.v1.global_variables_initializer())
-    mode1, mode2 = self.evaluate([mode1, mode2])
+    modes = self.evaluate(modes)
 
-    if training:
-      self.assertGreater(np.linalg.norm(mode1 - mode2), 0)
-    else:
-      self.assertAllEqual(mode1, mode2)
+    # Verify that the modes from action_distributions are not all the same.
+    any_modes_differ = False
+    for i in range(num_modes):
+      for j in range(i+1, num_modes):
+        any_modes_differ = np.linalg.norm(modes[i] - modes[j]) > 1e-6
+        if any_modes_differ:
+          self.assertEqual(training, any_modes_differ)
+          return
 
+    self.assertEqual(training, any_modes_differ)
 
 if __name__ == '__main__':
   tf.test.main()

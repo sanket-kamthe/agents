@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 r"""Train and Eval DDPG.
 
 To run:
@@ -39,7 +40,8 @@ from absl import flags
 from absl import logging
 
 import gin
-import tensorflow as tf
+from six.moves import range
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import actor_network
 from tf_agents.agents.ddpg import critic_network

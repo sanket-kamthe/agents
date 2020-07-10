@@ -19,7 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 
 from tf_agents.networks import normal_projection_network
@@ -40,7 +40,7 @@ class NormalProjectionNetworkTest(tf.test.TestCase):
 
     inputs = _get_inputs(batch_size=3, num_input_dims=5)
 
-    distribution = network(inputs, outer_rank=1)
+    distribution, _ = network(inputs, outer_rank=1)
     self.evaluate(tf.compat.v1.global_variables_initializer())
     self.assertEqual(tfp.distributions.Normal, type(distribution))
 
@@ -57,7 +57,7 @@ class NormalProjectionNetworkTest(tf.test.TestCase):
 
     inputs = _get_inputs(batch_size=3, num_input_dims=5)
 
-    distribution = network(inputs, outer_rank=1)
+    distribution, _ = network(inputs, outer_rank=1)
     self.evaluate(tf.compat.v1.global_variables_initializer())
     self.assertEqual(tfp.distributions.Normal, type(distribution))
 
@@ -107,7 +107,7 @@ class NormalProjectionNetworkTest(tf.test.TestCase):
 
     inputs = _get_inputs(batch_size=100, num_input_dims=5)
 
-    distributions = network(inputs, outer_rank=1)
+    distributions, _ = network(inputs, outer_rank=1)
     self.evaluate(tf.compat.v1.global_variables_initializer())
 
     sample = self.evaluate(distributions.sample())

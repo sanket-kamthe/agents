@@ -20,50 +20,85 @@ This is used in e.g. actor-critic algorithms like DDPG.
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+from typing import Optional, Text
+
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 
 from tf_agents.networks import network
 from tf_agents.policies import tf_policy
+from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
+from tf_agents.utils import tensor_normalizer
 
 
 @gin.configurable
-class ActorPolicy(tf_policy.Base):
+class ActorPolicy(tf_policy.TFPolicy):
   """Class to build Actor Policies."""
 
   def __init__(self,
-               time_step_spec,
-               action_spec,
-               actor_network,
-               info_spec=(),
-               observation_normalizer=None,
-               clip=True,
-               training=False,
-               name=None):
-    """Builds an Actor Policy given a actor network.
+               time_step_spec: ts.TimeStep,
+               action_spec: types.NestedTensorSpec,
+               actor_network: network.Network,
+               policy_state_spec: types.NestedTensorSpec = (),
+               info_spec: types.NestedTensorSpec = (),
+               observation_normalizer: Optional[
+                   tensor_normalizer.TensorNormalizer] = None,
+               clip: bool = True,
+               training: bool = False,
+               observation_and_action_constraint_splitter: Optional[
+                   types.Splitter] = None,
+               name: Optional[Text] = None):
+    """Builds an Actor Policy given an actor network.
 
     Args:
       time_step_spec: A `TimeStep` spec of the expected time_steps.
-      action_spec: A nest of BoundedTensorSpec representing the actions.
+      action_spec: A nest of `BoundedTensorSpec` representing the actions.
       actor_network: An instance of a `tf_agents.networks.network.Network` to be
-        used by the policy. The network will be called with call(observation,
-        step_type, policy_state) and should return (actions_or_distributions,
-        new_state).
-      info_spec: A nest of TensorSpec representing the policy info.
+        used by the policy. The network will be called with `call(observation,
+        step_type, policy_state)` and should return `(actions_or_distributions,
+        new_state)`.
+      policy_state_spec: A nest of TensorSpec representing the policy_state.
+        If not set, defaults to actor_network.state_spec.
+      info_spec: A nest of `TensorSpec` representing the policy info.
       observation_normalizer: An object to use for observation normalization.
-      clip: Whether to clip actions to spec before returning them.  Default
-        True. Most policy-based algorithms (PCL, PPO, REINFORCE) use unclipped
+      clip: Whether to clip actions to spec before returning them. Default True.
+        Most policy-based algorithms (PCL, PPO, REINFORCE) use unclipped
         continuous actions for training.
       training: Whether the network should be called in training mode.
+      observation_and_action_constraint_splitter: A function used to process
+        observations with action constraints. These constraints can indicate,
+        for example, a mask of valid/invalid actions for a given state of the
+        environment.
+        The function takes in a full observation and returns a tuple consisting
+        of 1) the part of the observation intended as input to the network and
+        2) the constraint. An example
+        `observation_and_action_constraint_splitter` could be as simple as:
+        ```
+        def observation_and_action_constraint_splitter(observation):
+          return observation['network_input'], observation['constraint']
+        ```
+        *Note*: when using `observation_and_action_constraint_splitter`, make
+        sure the provided `actor_network` is compatible with the
+        network-specific half of the output of the
+        `observation_and_action_constraint_splitter`. In particular,
+        `observation_and_action_constraint_splitter` will be called on the
+        observation before passing to the network.
+        If `observation_and_action_constraint_splitter` is None, action
+        constraints are not applied.
       name: The name of this policy. All variables in this module will fall
         under that name. Defaults to the class name.
 
     Raises:
-      ValueError: if actor_network is not of type network.Network.
+      ValueError: if `actor_network` is not of type `network.Network`.
+      NotImplementedError: if `observation_and_action_constraint_splitter` is
+        not None but `action_spec` is not discrete.
     """
     if not isinstance(actor_network, network.Network):
       raise ValueError('actor_network must be a network.Network. Found '
@@ -73,32 +108,60 @@ class ActorPolicy(tf_policy.Base):
     self._observation_normalizer = observation_normalizer
     self._training = training
 
+    if observation_and_action_constraint_splitter is not None:
+      if len(tf.nest.flatten(action_spec)) > 1 or (
+          not tensor_spec.is_discrete(action_spec)):
+        raise NotImplementedError(
+            'Action constraints for ActorPolicy are currently only supported '
+            'for a single spec of discrete actions. Got action_spec {}'.format(
+                action_spec))
+
+    if not policy_state_spec:
+      policy_state_spec = actor_network.state_spec
+
     super(ActorPolicy, self).__init__(
         time_step_spec=time_step_spec,
         action_spec=action_spec,
-        policy_state_spec=actor_network.state_spec,
+        policy_state_spec=policy_state_spec,
         info_spec=info_spec,
         clip=clip,
+        observation_and_action_constraint_splitter=(
+            observation_and_action_constraint_splitter),
         name=name)
 
-  def _apply_actor_network(self, time_step, policy_state):
-    observation = time_step.observation
+  def _apply_actor_network(self, observation, step_type, policy_state,
+                           mask=None):
     if self._observation_normalizer:
       observation = self._observation_normalizer.normalize(observation)
-    return self._actor_network(
-        observation, time_step.step_type, policy_state, training=self._training)
+    if mask is None:
+      return self._actor_network(
+          observation, step_type, policy_state, training=self._training)
+    else:
+      return self._actor_network(
+          observation, step_type, policy_state, training=self._training,
+          mask=mask)
 
   @property
-  def observation_normalizer(self):
+  def observation_normalizer(
+      self) -> Optional[tensor_normalizer.TensorNormalizer]:
     return self._observation_normalizer
 
   def _variables(self):
     return self._actor_network.variables
 
   def _distribution(self, time_step, policy_state):
+    observation_and_action_constraint_splitter = (
+        self.observation_and_action_constraint_splitter)
+    network_observation = time_step.observation
+    mask = None
+
+    if observation_and_action_constraint_splitter is not None:
+      network_observation, mask = observation_and_action_constraint_splitter(
+          network_observation)
+
     # Actor network outputs nested structure of distributions or actions.
     actions_or_distributions, policy_state = self._apply_actor_network(
-        time_step, policy_state)
+        network_observation, time_step.step_type, policy_state, mask=mask)
 
     def _to_distribution(action_or_distribution):
       if isinstance(action_or_distribution, tf.Tensor):

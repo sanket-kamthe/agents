@@ -23,7 +23,7 @@ import os
 
 from absl.testing import parameterized
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import actor_network
 from tf_agents.environments import random_py_environment
@@ -79,21 +79,40 @@ class PyTFEagerPolicyTest(test_utils.TestCase):
 
     observation_spec = array_spec.ArraySpec([2], np.float32)
     action_spec = array_spec.BoundedArraySpec([1], np.float32, 2, 3)
+    info_spec = {
+        'a': array_spec.BoundedArraySpec([1], np.float32, 0, 1),
+        'b': array_spec.BoundedArraySpec([1], np.float32, 100, 101)
+    }
 
     observation_tensor_spec = tensor_spec.from_spec(observation_spec)
     action_tensor_spec = tensor_spec.from_spec(action_spec)
+    info_tensor_spec = tensor_spec.from_spec(info_spec)
     time_step_tensor_spec = ts.time_step_spec(observation_tensor_spec)
 
-    tf_policy = random_tf_policy.RandomTFPolicy(time_step_tensor_spec,
-                                                action_tensor_spec)
+    tf_policy = random_tf_policy.RandomTFPolicy(
+        time_step_tensor_spec, action_tensor_spec, info_spec=info_tensor_spec)
 
     py_policy = py_tf_eager_policy.PyTFEagerPolicy(tf_policy)
     env = random_py_environment.RandomPyEnvironment(observation_spec,
                                                     action_spec)
     time_step = env.reset()
 
+    def _check_action_step(action_step):
+      self.assertIsInstance(action_step.action, np.ndarray)
+      self.assertEqual(action_step.action.shape, (1,))
+      self.assertBetween(action_step.action[0], 2.0, 3.0)
+
+      self.assertIsInstance(action_step.info['a'], np.ndarray)
+      self.assertEqual(action_step.info['a'].shape, (1,))
+      self.assertBetween(action_step.info['a'][0], 0.0, 1.0)
+
+      self.assertIsInstance(action_step.info['b'], np.ndarray)
+      self.assertEqual(action_step.info['b'].shape, (1,))
+      self.assertBetween(action_step.info['b'][0], 100.0, 101.0)
+
     for _ in range(100):
       action_step = py_policy.action(time_step)
+      _check_action_step(action_step)
       time_step = env.step(action_step.action)
 
 
@@ -123,7 +142,6 @@ class SavedModelPYTFEagerPolicyTest(test_utils.TestCase,
         time_step_tensor_spec, action_tensor_spec, actor_network=actor_net)
 
   def testSavedModel(self):
-
     path = os.path.join(self.get_temp_dir(), 'saved_policy')
     saver = policy_saver.PolicySaver(self.tf_policy)
     saver.save(path)
@@ -146,6 +164,24 @@ class SavedModelPYTFEagerPolicyTest(test_utils.TestCase,
     np.testing.assert_array_almost_equal(original_action_np.action,
                                          saved_policy_action.action)
 
+  def testSavedModelLoadingSpecs(self):
+    path = os.path.join(self.get_temp_dir(), 'saved_policy')
+    saver = policy_saver.PolicySaver(self.tf_policy)
+    saver.save(path)
+
+    eager_py_policy = py_tf_eager_policy.SavedModelPyTFEagerPolicy(
+        path, load_specs_from_pbtxt=True)
+
+    # Bounded specs get converted to regular specs when saved into a proto.
+    def assert_specs_mostly_equal(loaded_spec, expected_spec):
+      self.assertEqual(loaded_spec.shape, expected_spec.shape)
+      self.assertEqual(loaded_spec.dtype, expected_spec.dtype)
+
+    tf.nest.map_structure(assert_specs_mostly_equal,
+                          eager_py_policy.time_step_spec, self.time_step_spec)
+    tf.nest.map_structure(assert_specs_mostly_equal,
+                          eager_py_policy.action_spec, self.action_spec)
+
   @parameterized.parameters(None, 0, 100, 200000)
   def testGetTrainStep(self, train_step):
     path = os.path.join(self.get_temp_dir(), 'saved_policy')
@@ -155,7 +191,9 @@ class SavedModelPYTFEagerPolicyTest(test_utils.TestCase,
       expected_train_step = -1
     else:
       saver = policy_saver.PolicySaver(
-          self.tf_policy, train_step=tf.constant(train_step))
+          self.tf_policy,
+          train_step=common.create_variable(
+              'train_step', initial_value=train_step))
       expected_train_step = train_step
     saver.save(path)
 
@@ -164,6 +202,84 @@ class SavedModelPYTFEagerPolicyTest(test_utils.TestCase,
 
     self.assertEqual(expected_train_step, eager_py_policy.get_train_step())
 
+  def testUpdateFromCheckpoint(self):
+    if not common.has_eager_been_enabled():
+      self.skipTest('Only supported in TF2.x.')
+
+    path = os.path.join(self.get_temp_dir(), 'saved_policy')
+    saver = policy_saver.PolicySaver(self.tf_policy)
+    saver.save(path)
+    self.evaluate(
+        tf.nest.map_structure(lambda v: v.assign(v * 0 + -1),
+                              self.tf_policy.variables()))
+    checkpoint_path = os.path.join(self.get_temp_dir(), 'checkpoint')
+    saver.save_checkpoint(checkpoint_path)
+
+    eager_py_policy = py_tf_eager_policy.SavedModelPyTFEagerPolicy(
+        path, self.time_step_spec, self.action_spec)
+
+    # Use evaluate to force a copy.
+    saved_model_variables = self.evaluate(eager_py_policy.variables())
+
+    eager_py_policy.update_from_checkpoint(checkpoint_path)
+
+    assert_np_not_equal = lambda a, b: self.assertFalse(np.equal(a, b).all())
+    tf.nest.map_structure(assert_np_not_equal, saved_model_variables,
+                          self.evaluate(eager_py_policy.variables()))
+
+    assert_np_all_equal = lambda a, b: self.assertTrue(np.equal(a, b).all())
+    tf.nest.map_structure(assert_np_all_equal,
+                          self.evaluate(self.tf_policy.variables()),
+                          self.evaluate(eager_py_policy.variables()),
+                          check_types=False)
+
+  def testInferenceFromCheckpoint(self):
+    if not common.has_eager_been_enabled():
+      self.skipTest('Only supported in TF2.x.')
+
+    path = os.path.join(self.get_temp_dir(), 'saved_policy')
+    saver = policy_saver.PolicySaver(self.tf_policy)
+    saver.save(path)
+
+    rng = np.random.RandomState()
+    sample_time_step = array_spec.sample_spec_nest(self.time_step_spec, rng)
+    batched_sample_time_step = nest_utils.batch_nested_array(sample_time_step)
+
+    self.evaluate(
+        tf.nest.map_structure(lambda v: v.assign(v * 0 + -1),
+                              self.tf_policy.variables()))
+    checkpoint_path = os.path.join(self.get_temp_dir(), 'checkpoint')
+    saver.save_checkpoint(checkpoint_path)
+
+    eager_py_policy = py_tf_eager_policy.SavedModelPyTFEagerPolicy(
+        path, self.time_step_spec, self.action_spec)
+
+    # Use evaluate to force a copy.
+    saved_model_variables = self.evaluate(eager_py_policy.variables())
+
+    eager_py_policy.update_from_checkpoint(checkpoint_path)
+
+    assert_np_not_equal = lambda a, b: self.assertFalse(np.equal(a, b).all())
+    tf.nest.map_structure(assert_np_not_equal, saved_model_variables,
+                          self.evaluate(eager_py_policy.variables()))
+
+    assert_np_all_equal = lambda a, b: self.assertTrue(np.equal(a, b).all())
+    tf.nest.map_structure(assert_np_all_equal,
+                          self.evaluate(self.tf_policy.variables()),
+                          self.evaluate(eager_py_policy.variables()),
+                          check_types=False)
+
+    # Can't check if the action is different as in some cases depending on
+    # variable initialization it will be the same. Checking that they are at
+    # least always the same.
+    checkpoint_action = eager_py_policy.action(sample_time_step)
+
+    current_policy_action = self.tf_policy.action(batched_sample_time_step)
+    current_policy_action = self.evaluate(
+        nest_utils.unbatch_nested_tensors(current_policy_action))
+    tf.nest.map_structure(assert_np_all_equal, current_policy_action,
+                          checkpoint_action)
+
 
 if __name__ == '__main__':
-  tf.test.main()
+  test_utils.main()

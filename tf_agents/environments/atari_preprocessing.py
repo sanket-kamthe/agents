@@ -25,12 +25,13 @@ This includes:
   . Resizing the image before it is provided to the agent.
 
 """
-
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import gin
+import gym
 from gym import core as gym_core
 from gym.spaces import box
 import numpy as np
@@ -55,10 +56,10 @@ class AtariPreprocessing(gym_core.Wrapper):
   """
 
   def __init__(self,
-               env,
-               frame_skip=4,
-               terminal_on_life_loss=False,
-               screen_size=84):
+               env: gym.Env,
+               frame_skip: int = 4,
+               terminal_on_life_loss: bool = False,
+               screen_size: int = 84):
     """Constructor for an Atari 2600 preprocessor.
 
     Args:
@@ -103,21 +104,21 @@ class AtariPreprocessing(gym_core.Wrapper):
     self.game_over = False
     self.lives = 0  # Will need to be set by reset().
 
-  def reset(self):
+  def reset(self) -> np.ndarray:
     """Resets the environment.
 
     Returns:
       observation: numpy array, the initial observation emitted by the
         environment.
     """
-    super(AtariPreprocessing, self).reset()
+    self.env.reset()
     self.lives = self.env.ale.lives()
     self.game_over = False
     self._fetch_grayscale_observation(self.screen_buffer[0])
     self.screen_buffer[1].fill(0)
     return self._pool_and_resize()
 
-  def step(self, action):
+  def step(self, action: np.ndarray) -> np.ndarray:
     """Applies the given action in the environment.
 
     Remarks:
@@ -143,7 +144,7 @@ class AtariPreprocessing(gym_core.Wrapper):
     for time_step in range(self.frame_skip):
       # We bypass the Gym observation altogether and directly fetch the
       # grayscale image from the ALE. This is a little faster.
-      _, reward, game_over, info = super(AtariPreprocessing, self).step(action)
+      _, reward, game_over, info = self.env.step(action)
       accumulated_reward += reward
 
       if self.terminal_on_life_loss:
@@ -157,7 +158,9 @@ class AtariPreprocessing(gym_core.Wrapper):
         break
       # We max-pool over the last two frames, in grayscale.
       elif time_step >= self.frame_skip - 2:
-        t = time_step - (self.frame_skip - 2)
+        # When frame_skip==1, taking a max ensures that it's still
+        # screen_buffer[0] that holds the fetched observation
+        t = time_step - max(self.frame_skip - 2, 0)
         self._fetch_grayscale_observation(self.screen_buffer[t])
 
     # Pool the last two observations.

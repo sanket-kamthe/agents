@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 from tf_agents.distributions import utils
 from tf_agents.specs import tensor_spec
@@ -49,6 +49,13 @@ class UtilsTest(tf.test.TestCase):
     squash_to_spec_normal = utils.SquashToSpecNormal(input_dist, action_spec)
     self.assertAlmostEqual(
         self.evaluate(squash_to_spec_normal.mode()), 3.28478247, places=5)
+
+  def testSquashToSpecNormalStdMethod(self):
+    input_dist = tfp.distributions.Normal(loc=1.0, scale=3.0)
+    action_spec = tensor_spec.BoundedTensorSpec([1], tf.float32, -2.0, 4.0)
+    squash_to_spec_normal = utils.SquashToSpecNormal(input_dist, action_spec)
+    self.assertAlmostEqual(
+        self.evaluate(squash_to_spec_normal.stddev()), 2.98516426, places=5)
 
 
 if __name__ == '__main__':

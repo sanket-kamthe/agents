@@ -20,12 +20,14 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
-
 from tf_agents.specs import array_spec
-# Needed because BoundedTensorSpec is not exported from tensorflow.
+
+from google.protobuf import text_format
+from tensorflow.core.protobuf import struct_pb2  # pylint:disable=g-direct-tensorflow-import  # TF internal
 from tensorflow.python.framework import tensor_spec as ts  # TF internal
+from tensorflow.python.saved_model import nested_structure_coder  # pylint:disable=g-direct-tensorflow-import  # TF internal
 
 tfd = tfp.distributions
 
@@ -225,8 +227,8 @@ def sample_bounded_spec(spec, seed=None, outer_dims=None):
   if dtype in [tf.float64, tf.float32]:
     # Avoid under/over-flow as random_uniform can't sample over the full range
     # for these types.
-    minval = np.maximum(dtype.min / 2, minval)
-    maxval = np.minimum(dtype.max / 2, maxval)
+    minval = np.maximum(dtype.min / 8, minval)
+    maxval = np.minimum(dtype.max / 8, maxval)
 
   if outer_dims is None:
     outer_dims = tf.constant([], dtype=tf.int32)
@@ -339,9 +341,17 @@ def sample_spec_nest(structure, seed=None, outer_dims=()):
               values=values_sample,
               dense_shape=shape))
     elif isinstance(spec, (TensorSpec, BoundedTensorSpec)):
-      spec = BoundedTensorSpec.from_spec(spec)
-      return sample_bounded_spec(
-          spec, outer_dims=outer_dims, seed=seed_stream())
+      if spec.dtype == tf.string:
+        sample_spec = BoundedTensorSpec(
+            spec.shape, tf.int32, minimum=0, maximum=10)
+        return tf.as_string(
+            sample_bounded_spec(
+                sample_spec, outer_dims=outer_dims, seed=seed_stream()))
+      else:
+        return sample_bounded_spec(
+            BoundedTensorSpec.from_spec(spec),
+            outer_dims=outer_dims,
+            seed=seed_stream())
     else:
       raise TypeError("Spec type not supported: '{}'".format(spec))
 
@@ -411,3 +421,86 @@ def add_outer_dims_nest(specs, outer_dims):
     return TensorSpec(shape, spec.dtype, name=name)
 
   return tf.nest.map_structure(add_outer_dims, specs)
+
+
+def remove_outer_dims_nest(specs, outer_dims):
+  """Removes the specified number of outer dimensions from the input spec nest.
+
+  Args:
+    specs: Nested list/tuple/dict of TensorSpecs/ArraySpecs, describing the
+      shape of tensors.
+    outer_dims: (int) Number of outer dimensions to remove.
+
+  Returns:
+    Nested TensorSpecs with outer dimensions removed from the input specs.
+
+  Raises:
+    Value error if a spec in the nest has shape rank less than `outer_dims`.
+  """
+
+  def remove_outer_dims(spec):
+    """Removes the outer_dims of a tensor spec."""
+    name = spec.name
+    if len(spec.shape) < outer_dims:
+      raise ValueError("The shape of spec {} has rank lower than the specified "
+                       "outer_dims {}".format(spec, outer_dims))
+    shape = list(spec.shape)[outer_dims:]
+    if hasattr(spec, "minimum") and hasattr(spec, "maximum"):
+      if isinstance(spec.minimum,
+                    (tuple, list)) and len(spec.minimum) == len(spec.shape):
+        minimum = spec.minimum[outer_dims:]
+      else:
+        minimum = spec.minimum
+      if isinstance(spec.maximum,
+                    (tuple, list)) and len(spec.maximum) == len(spec.shape):
+        maximum = spec.maximum[outer_dims:]
+      else:
+        maximum = spec.maximum
+
+      return BoundedTensorSpec(shape, spec.dtype, minimum, maximum, name)
+    return TensorSpec(shape, spec.dtype, name=name)
+
+  return tf.nest.map_structure(remove_outer_dims, specs)
+
+
+def to_proto(spec):
+  """Encodes a nested spec into a struct_pb2.StructuredValue proto.
+
+  Args:
+    spec: Nested list/tuple or dict of TensorSpecs, describing the
+      shape of the non-batched Tensors.
+  Returns:
+    A `struct_pb2.StructuredValue` proto.
+  """
+  # Make sure spec is a tensor_spec.
+  spec = from_spec(spec)
+  signature_encoder = nested_structure_coder.StructureCoder()
+  return signature_encoder.encode_structure(spec)
+
+
+def from_proto(spec_proto):
+  """Decodes a struct_pb2.StructuredValue proto into a nested spec."""
+  signature_encoder = nested_structure_coder.StructureCoder()
+  return signature_encoder.decode_proto(spec_proto)
+
+
+def from_packed_proto(spec_packed_proto):
+  """Decodes a packed Any proto containing the structured value for the spec."""
+  spec_proto = struct_pb2.StructuredValue()
+  spec_packed_proto.Unpack(spec_proto)
+  return from_proto(spec_proto)
+
+
+def to_pbtxt_file(output_path, spec):
+  """Saves a spec encoded as a struct_pb2.StructuredValue in a pbtxt file."""
+  spec_proto = to_proto(spec)
+  with tf.io.gfile.GFile(output_path, "wb") as f:
+    f.write(text_format.MessageToString(spec_proto))
+
+
+def from_pbtxt_file(spec_path):
+  """Loads a spec encoded as a struct_pb2.StructuredValue from a pbtxt file."""
+  spec_proto = struct_pb2.StructuredValue()
+  with tf.io.gfile.GFile(spec_path, "rb") as f:
+    text_format.MergeLines(f, spec_proto)
+  return from_proto(spec_proto)

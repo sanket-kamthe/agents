@@ -21,7 +21,7 @@ from __future__ import print_function
 
 import functools
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.environments import wrappers
 from tf_agents.specs import array_spec
@@ -61,7 +61,7 @@ def convert_spec(spec):
     tfa_spec = array_spec.ArraySpec.from_spec(spec)
 
   if tfa_spec.dtype == np.float64:
-    tfa_spec = array_spec.update_spec_dtype(tfa_spec, np.float32)
+    tfa_spec = tfa_spec.replace(dtype=np.float32)
   return tfa_spec
 
 

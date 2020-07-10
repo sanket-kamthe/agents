@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 r"""Train and Eval TD3.
 
 To run:
@@ -39,7 +40,8 @@ from absl import flags
 from absl import logging
 
 import gin
-import tensorflow as tf
+from six.moves import range
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import actor_rnn_network
 from tf_agents.agents.ddpg import critic_rnn_network
@@ -94,7 +96,6 @@ def train_eval(
     train_sequence_length=10,
     actor_learning_rate=1e-4,
     critic_learning_rate=1e-3,
-    dqda_clipping=None,
     td_errors_loss_fn=None,
     gamma=0.995,
     reward_scale_factor=1.0,
@@ -176,7 +177,6 @@ def train_eval(
         target_update_tau=target_update_tau,
         target_update_period=target_update_period,
         actor_update_period=actor_update_period,
-        dqda_clipping=dqda_clipping,
         td_errors_loss_fn=td_errors_loss_fn,
         gamma=gamma,
         reward_scale_factor=reward_scale_factor,

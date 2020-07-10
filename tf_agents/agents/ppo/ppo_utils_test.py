@@ -21,7 +21,7 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 
 from tf_agents.agents.ppo import ppo_utils
@@ -30,7 +30,10 @@ from tf_agents.trajectories import time_step as ts
 
 class PPOUtilsTest(parameterized.TestCase, tf.test.TestCase):
 
-  def testMakeTimestepMaskWithPartialEpisode(self):
+  @parameterized.named_parameters(
+      ('OnNotAllowPartialReturnsZerosOnIncompleteSteps', False),
+      ('OnAllowPartialReturnsOnesOnIncompleteStepsAndZerosBetween', True))
+  def testMakeTimestepMaskWithPartialEpisode(self, allow_partial):
     first, mid, last = ts.StepType.FIRST, ts.StepType.MID, ts.StepType.LAST
 
     next_step_types = tf.constant([[mid, mid, last, first,
@@ -42,15 +45,18 @@ class PPOUtilsTest(parameterized.TestCase, tf.test.TestCase):
     zeros = tf.zeros_like(next_step_types)
     next_time_step = ts.TimeStep(next_step_types, zeros, zeros, zeros)
 
-    # Mask should be 0.0 for transition timesteps (3, 7) and for all timesteps
-    #   belonging to the final, incomplete episode.
-    expected_mask = [[1.0, 1.0, 1.0, 0.0,
-                      1.0, 1.0, 1.0, 0.0,
-                      0.0, 0.0],
-                     [1.0, 1.0, 1.0, 0.0,
-                      1.0, 1.0, 1.0, 1.0,
-                      1.0, 1.0]]
-    timestep_mask = ppo_utils.make_timestep_mask(next_time_step)
+    if not allow_partial:
+      # Mask should be 0.0 for transition timesteps (3, 7) and for all timesteps
+      #   belonging to the final, incomplete episode.
+      expected_mask = [[1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                       [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]]
+    else:
+      # Zeros only between episodes. Incomplete episodes are valid and not
+      # zeroed out.
+      expected_mask = [[1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+                       [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]]
+    timestep_mask = ppo_utils.make_timestep_mask(
+        next_time_step, allow_partial_episodes=allow_partial)
 
     timestep_mask_ = self.evaluate(timestep_mask)
     self.assertAllClose(expected_mask, timestep_mask_)
@@ -80,6 +86,23 @@ class PPOUtilsTest(parameterized.TestCase, tf.test.TestCase):
                         [set(d.keys()) for d in params])
     self.assertAllEqual([[[2]], [[2], [2]]],
                         [[d[k].shape.as_list() for k in d] for d in params])
+
+  def test_get_learning_rate(self):
+    optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=0.1)
+    learning_rate = ppo_utils.get_learning_rate(optimizer)
+    expected_learning_rate = 0.1
+    self.assertAlmostEqual(expected_learning_rate, learning_rate)
+
+  def test_get_learning_rate_with_fn(self):
+    learning_rate_var = tf.Variable(0.1, dtype=tf.float64)
+    def learning_rate_fn():
+      return learning_rate_var
+
+    optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate_fn)
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    learning_rate = ppo_utils.get_learning_rate(optimizer)
+    expected_learning_rate = 0.1
+    self.assertAlmostEqual(expected_learning_rate, self.evaluate(learning_rate))
 
 if __name__ == '__main__':
   tf.test.main()

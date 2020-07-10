@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A PPO Agent."""
+"""PPO Agents."""
 from tf_agents.agents.ppo import ppo_agent
+from tf_agents.agents.ppo import ppo_clip_agent
+from tf_agents.agents.ppo import ppo_kl_penalty_agent
 from tf_agents.agents.ppo import ppo_policy
 from tf_agents.agents.ppo import ppo_utils
-

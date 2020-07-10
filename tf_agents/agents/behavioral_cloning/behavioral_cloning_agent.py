@@ -22,16 +22,22 @@ Users must provide their own loss functions.
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import collections
+from typing import Optional, Text
+
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents import tf_agent
+from tf_agents.networks import network
 from tf_agents.policies import epsilon_greedy_policy
 from tf_agents.policies import greedy_policy
 from tf_agents.policies import q_policy
+from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import common
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
@@ -68,20 +74,20 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
 
   def __init__(
       self,
-      time_step_spec,
-      action_spec,
-      cloning_network,
-      optimizer,
-      num_outer_dims=1,
+      time_step_spec: ts.TimeStep,
+      action_spec: types.NestedTensorSpec,
+      cloning_network: network.Network,
+      optimizer: types.Optimizer,
+      num_outer_dims: int = 1,
       # Params for training.
-      epsilon_greedy=0.1,
-      loss_fn=None,
-      gradient_clipping=None,
+      epsilon_greedy: types.Float = 0.1,
+      loss_fn: types.LossFn = None,
+      gradient_clipping: Optional[types.Float] = None,
       # Params for debugging.
-      debug_summaries=False,
-      summarize_grads_and_vars=False,
-      train_step_counter=None,
-      name=None):
+      debug_summaries: bool = False,
+      summarize_grads_and_vars: bool = False,
+      train_step_counter: Optional[tf.Variable] = None,
+      name: Optional[Text] = None):
     """Creates an behavioral cloning Agent.
 
     Args:
@@ -91,15 +97,15 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
         The network will be called as
 
           ```
-          network(observation, step_type, network_state=None)
+          network(observation, step_type, network_state=initial_state)
           ```
-        (with `network_state` optional) and must return a 2-tuple with elements
-        `(output, next_network_state)` where `output` will be passed as the
-        first argument to `loss_fn`, and used by a `Policy`.  Input tensors will
-        be shaped `[batch, time, ...]` when training, and they will be shaped
-        `[batch, ...]` when the network is called within a `Policy`.  If
-        `cloning_network` has an empty network state, then for training
-        `time` will always be `1` (individual examples).
+        and must return a 2-tuple with elements `(output, next_network_state)`
+        where `output` will be passed as the first argument to `loss_fn`, and
+        used by a `Policy`.  Input tensors will be shaped `[batch, time, ...]`
+        when training, and they will be shaped `[batch, ...]` when the network
+        is called within a `Policy`.  If `cloning_network` has an empty network
+        state, then for training `time` will always be `1`
+        (individual examples).
       optimizer: The optimizer to use for training.
       num_outer_dims: The number of outer dimensions for the agent. Must be
         either 1 or 2. If 2, training will require both a batch_size and time
@@ -167,7 +173,7 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
         action_spec,
         policy,
         collect_policy,
-        train_sequence_length=1 if not cloning_network.state_spec else None,
+        train_sequence_length=None,
         num_outer_dims=num_outer_dims,
         debug_summaries=debug_summaries,
         summarize_grads_and_vars=summarize_grads_and_vars,
@@ -191,7 +197,12 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
 
   def _get_policies(self, time_step_spec, action_spec, cloning_network):
     policy = q_policy.QPolicy(
-        time_step_spec, action_spec, q_network=self._cloning_network)
+        time_step_spec, action_spec, q_network=self._cloning_network,
+        # Unlike DQN, we support continuous action spaces - in which case
+        # the policy just emits the network output.  In that case, we
+        # don't care if the action_spec is a scalar integer value.
+        validate_action_spec_and_network=False,
+    )
     collect_policy = epsilon_greedy_policy.EpsilonGreedyPolicy(
         policy, epsilon=self._epsilon_greedy)
     policy = greedy_policy.GreedyPolicy(policy)
@@ -244,9 +255,14 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
       else:
         actions = tf.nest.flatten(experience.action)[0]
 
+      batch_size = (
+          tf.compat.dimension_value(experience.step_type.shape[0]) or
+          tf.shape(experience.step_type)[0])
       logits, _ = self._cloning_network(
           experience.observation,
-          experience.step_type)
+          experience.step_type,
+          training=True,
+          network_state=self._cloning_network.get_initial_state(batch_size))
 
       error = self._loss_fn(logits, actions)
       error_dtype = tf.nest.flatten(error)[0].dtype
@@ -265,13 +281,20 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
       #   is the actual number of non-zero weight would artificially increase
       #   their contribution in the loss. Think about what would happen as
       #   the number of boundary samples increases.
-      if weights is not None:
-        error *= weights
-      loss = tf.reduce_mean(input_tensor=error)
 
-      with tf.name_scope('Losses/'):
-        tf.compat.v2.summary.scalar(
-            name='loss', data=loss, step=self.train_step_counter)
+      agg_loss = common.aggregate_losses(
+          per_example_loss=error,
+          sample_weight=weights,
+          regularization_loss=self._cloning_network.losses)
+      total_loss = agg_loss.total_loss
+
+      dict_losses = {'loss': agg_loss.weighted,
+                     'reg_loss': agg_loss.regularization,
+                     'total_loss': total_loss}
+
+      common.summarize_scalar_dict(dict_losses,
+                                   step=self.train_step_counter,
+                                   name_scope='Losses/')
 
       if self._summarize_grads_and_vars:
         with tf.name_scope('Variables/'):
@@ -285,4 +308,5 @@ class BehavioralCloningAgent(tf_agent.TFAgent):
         common.generate_tensor_summaries('errors', error,
                                          self.train_step_counter)
 
-      return tf_agent.LossInfo(loss, BehavioralCloningLossInfo(loss=error))
+      return tf_agent.LossInfo(total_loss,
+                               BehavioralCloningLossInfo(loss=error))

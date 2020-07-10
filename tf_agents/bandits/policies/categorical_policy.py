@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 from tf_agents.policies import tf_policy
 from tf_agents.trajectories import policy_step
@@ -35,7 +35,7 @@ def _validate_weights(weights):
         'Expected a 1D `Tensor` of weights; got {}.'.format(weights))
 
 
-class CategoricalPolicy(tf_policy.Base):
+class CategoricalPolicy(tf_policy.TFPolicy):
   """Policy that chooses an action based on a categorical distribution.
 
   The distribution is specified by a set of weights for each action and an

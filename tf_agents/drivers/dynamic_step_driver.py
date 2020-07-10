@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.environments import bandit_py_environment
 from tf_agents.bandits.environments import bandit_tf_environment
@@ -73,18 +73,20 @@ class DynamicStepDriver(driver.Driver):
 
     Args:
       env: A tf_environment.Base environment.
-      policy: A tf_policy.Base policy.
+      policy: A tf_policy.TFPolicy policy.
       observers: A list of observers that are updated after every step in the
         environment. Each observer is a callable(time_step.Trajectory).
       transition_observers: A list of observers that are updated after every
         step in the environment. Each observer is a callable((TimeStep,
         PolicyStep, NextTimeStep)).
-      num_steps: The number of steps to take in the environment.
+      num_steps: The number of steps to take in the environment. For batched
+        or parallel environments, this is the total number of steps taken
+        summed across all environments.
 
     Raises:
       ValueError:
         If env is not a tf_environment.Base or policy is not an instance of
-        tf_policy.Base.
+        tf_policy.TFPolicy.
     """
     super(DynamicStepDriver, self).__init__(env, policy, observers,
                                             transition_observers)

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 """Tests for tf_agents.policies.temporal_action_smoothing."""
 from __future__ import absolute_import
 from __future__ import division
@@ -20,7 +21,8 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 import numpy as np
-import tensorflow as tf
+from six.moves import range
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.policies import temporal_action_smoothing
 from tf_agents.policies import tf_policy
@@ -30,7 +32,7 @@ from tf_agents.trajectories import time_step as ts
 from tf_agents.utils import test_utils
 
 
-class StateIncrementPolicy(tf_policy.Base):
+class StateIncrementPolicy(tf_policy.TFPolicy):
 
   def __init__(self, time_step_spec, action_spec):
     super(StateIncrementPolicy, self).__init__(
@@ -43,6 +45,9 @@ class StateIncrementPolicy(tf_policy.Base):
     actions = tf.nest.map_structure(lambda t: t + 1, policy_state)
     return policy_step.PolicyStep(actions, actions, ())
 
+  def _distribution(self):
+    return policy_step.PolicyStep(())
+
 
 class TemporalActionSmoothingTest(parameterized.TestCase, test_utils.TestCase):
 
@@ -54,7 +59,8 @@ class TemporalActionSmoothingTest(parameterized.TestCase, test_utils.TestCase):
 
   @property
   def _time_step(self):
-    return ts.transition(tf.constant([[1, 2]], dtype=tf.float32), reward=[1.])
+    return ts.transition(tf.constant([[1, 2]], dtype=tf.float32),
+                         reward=tf.constant([1.]))
 
   def testStateIncrementPolicy(self):
     policy = StateIncrementPolicy(self._time_step_spec, self._action_spec)

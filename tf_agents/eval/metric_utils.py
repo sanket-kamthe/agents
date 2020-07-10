@@ -20,10 +20,10 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-
 from absl import logging
+import gin
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.drivers import dynamic_episode_driver
 from tf_agents.drivers import py_driver
 from tf_agents.metrics import py_metric
@@ -47,6 +47,7 @@ def log_metrics(metrics, prefix=''):
   logging.info('%s \n\t\t %s', prefix, '\n\t\t '.join(log))
 
 
+@gin.configurable
 def compute(metrics,
             environment,
             policy,
@@ -81,6 +82,7 @@ def compute(metrics,
   return collections.OrderedDict(results)
 
 
+@gin.configurable
 def compute_summaries(metrics,
                       environment,
                       policy,
@@ -117,6 +119,7 @@ def compute_summaries(metrics,
 
 
 # TODO(b/130250285): Match compute and compute_summaries signatures.
+@gin.configurable
 def eager_compute(metrics,
                   environment,
                   policy,
@@ -163,7 +166,7 @@ def eager_compute(metrics,
 
   results = [(metric.name, metric.result()) for metric in metrics]
   # TODO(b/120301678) remove the summaries and merge with compute
-  if train_step and summary_writer:
+  if train_step is not None and summary_writer:
     with summary_writer.as_default():
       for m in metrics:
         tag = common.join_scope(summary_prefix, m.name)

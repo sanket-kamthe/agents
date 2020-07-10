@@ -22,13 +22,11 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.metrics import py_metrics
 from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
 from tf_agents.utils import nest_utils
-
-from tensorflow.python.framework import test_util  # pylint:disable=g-direct-tensorflow-import  # TF internal
 
 
 class PyMetricsTest(tf.test.TestCase, parameterized.TestCase):
@@ -188,7 +186,6 @@ class PyMetricsTest(tf.test.TestCase, parameterized.TestCase):
     counter()
     self.assertEqual(1, counter.result())
 
-  @test_util.run_in_graph_and_eager_modes()
   def testSaveRestore(self):
     metrics = [
         py_metrics.AverageReturnMetric(),

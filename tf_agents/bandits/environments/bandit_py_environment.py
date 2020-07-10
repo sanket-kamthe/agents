@@ -21,7 +21,7 @@ from __future__ import print_function
 import abc
 import numpy as np
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
@@ -40,9 +40,10 @@ class BanditPyEnvironment(py_environment.PyEnvironment):
   returned by step(action) will contain the reward and the next observation.
   """
 
-  def __init__(self, observation_spec, action_spec):
+  def __init__(self, observation_spec, action_spec, reward_spec=None):
     self._observation_spec = observation_spec
     self._action_spec = action_spec
+    self._reward_spec = reward_spec
     super(BanditPyEnvironment, self).__init__()
 
   def _reset(self):
@@ -53,7 +54,8 @@ class BanditPyEnvironment(py_environment.PyEnvironment):
     Returns:
       A time step of type FIRST containing an observation.
     """
-    return ts.restart(self._observe(), batch_size=self.batch_size)
+    return ts.restart(self._observe(), batch_size=self.batch_size,
+                      reward_spec=self.reward_spec())
 
   def _step(self, action):
     """Returns a time step containing the reward for the action taken.
@@ -77,6 +79,9 @@ class BanditPyEnvironment(py_environment.PyEnvironment):
 
   def observation_spec(self):
     return self._observation_spec
+
+  def reward_spec(self):
+    return self._reward_spec
 
   def _empty_observation(self):
     return tf.nest.map_structure(lambda x: np.zeros(x.shape, x.dtype),

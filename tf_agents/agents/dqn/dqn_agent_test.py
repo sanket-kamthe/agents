@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 from absl.testing import parameterized
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.networks import network
@@ -45,19 +45,24 @@ class DummyNet(network.Network):
     super(DummyNet, self).__init__(
         observation_spec, state_spec=(), name=name)
     num_actions = action_spec.maximum - action_spec.minimum + 1
-    self._layers.append(
+
+    # Store custom layers that can be serialized through the Checkpointable API.
+    self._dummy_layers = [
         tf.keras.layers.Dense(
             num_actions,
             kernel_regularizer=tf.keras.regularizers.l2(
                 l2_regularization_weight),
-            kernel_initializer=tf.compat.v1.initializers.constant([[2, 1],
-                                                                   [1, 1]]),
-            bias_initializer=tf.compat.v1.initializers.constant([[1], [1]])))
+            kernel_initializer=tf.compat.v1.initializers.constant(
+                [[num_actions, 1],
+                 [1, 1]]),
+            bias_initializer=tf.compat.v1.initializers.constant(
+                [[1], [1]]))
+    ]
 
   def call(self, inputs, step_type=None, network_state=()):
     del step_type
     inputs = tf.cast(inputs, tf.float32)
-    for layer in self.layers:
+    for layer in self._dummy_layers:
       inputs = layer(inputs)
     return inputs, network_state
 
@@ -95,7 +100,7 @@ class DqnAgentTest(test_utils.TestCase):
     self.assertIsNotNone(agent.policy)
 
   def testCreateAgentWithPrebuiltPreprocessingLayers(self, agent_class):
-    dense_layer = tf.keras.layers.Dense(3)
+    dense_layer = tf.keras.layers.Dense(2)
     q_net = networks_test_utils.KerasLayersNet(self._observation_spec,
                                                self._action_spec,
                                                dense_layer)
@@ -107,16 +112,19 @@ class DqnAgentTest(test_utils.TestCase):
           q_network=q_net,
           optimizer=None)
 
-    # Explicitly share weights between q and target networks; this is ok.
+    # Explicitly share weights between q and target networks.
+    # This would be an unusual setup so we check that an error is thrown.
     q_target_net = networks_test_utils.KerasLayersNet(self._observation_spec,
                                                       self._action_spec,
                                                       dense_layer)
-    agent_class(
-        self._time_step_spec,
-        self._action_spec,
-        q_network=q_net,
-        optimizer=None,
-        target_q_network=q_target_net)
+    with self.assertRaisesRegexp(
+        ValueError, 'shares weights with the original network'):
+      agent_class(
+          self._time_step_spec,
+          self._action_spec,
+          q_network=q_net,
+          optimizer=None,
+          target_q_network=q_target_net)
 
   def testInitializeAgent(self, agent_class):
     q_net = DummyNet(self._observation_spec, self._action_spec)
@@ -134,9 +142,19 @@ class DqnAgentTest(test_utils.TestCase):
   def testCreateAgentDimChecks(self, agent_class):
     action_spec = tensor_spec.BoundedTensorSpec([1, 2], tf.int32, 0, 1)
     q_net = DummyNet(self._observation_spec, action_spec)
-    with self.assertRaisesRegexp(ValueError, '.*one dimensional.*'):
+    with self.assertRaisesRegex(ValueError, 'Only scalar actions'):
       agent_class(
           self._time_step_spec, action_spec, q_network=q_net, optimizer=None)
+
+  def testInvalidNetworkOutputSize(self, agent_class):
+    wrong_action_spec = tensor_spec.BoundedTensorSpec((), tf.int32, 0, 2)
+    q_net = q_network.QNetwork(
+        self._time_step_spec.observation,
+        wrong_action_spec)
+    with self.assertRaisesRegex(ValueError, r'with inner dims \(2,\)'):
+      agent_class(
+          self._time_step_spec, self._action_spec,
+          q_network=q_net, optimizer=None)
 
   # TODO(b/127383724): Add a test where the target network has different values.
   def testLoss(self, agent_class):

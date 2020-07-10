@@ -17,9 +17,13 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
-import tensorflow as tf
+from typing import Optional
+
+import gin
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 
 from tf_agents.agents.ppo import ppo_utils
@@ -29,10 +33,14 @@ from tf_agents.specs import distribution_spec
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import policy_step
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
+from tf_agents.utils import tensor_normalizer
+
 
 tfd = tfp.distributions
 
 
+@gin.configurable(module='tf_agents')
 class PPOPolicy(actor_policy.ActorPolicy):
   """An ActorPolicy that also returns policy_info needed for PPO training.
 
@@ -47,13 +55,15 @@ class PPOPolicy(actor_policy.ActorPolicy):
   """
 
   def __init__(self,
-               time_step_spec=None,
-               action_spec=None,
-               actor_network=None,
-               value_network=None,
-               observation_normalizer=None,
-               clip=True,
-               collect=True):
+               time_step_spec: Optional[ts.TimeStep] = None,
+               action_spec: Optional[types.NestedTensorSpec] = None,
+               actor_network: Optional[network.Network] = None,
+               value_network: Optional[network.Network] = None,
+               observation_normalizer: Optional[
+                   tensor_normalizer.TensorNormalizer] = None,
+               clip: bool = True,
+               collect: bool = True,
+               compute_value_and_advantage_in_train: bool = False):
     """Builds a PPO Policy given network Templates or functions.
 
     Args:
@@ -73,12 +83,25 @@ class PPOPolicy(actor_policy.ActorPolicy):
         continuous actions for training.
       collect: If True, creates ops for actions_log_prob, value_preds, and
         action_distribution_params. (default True)
+      compute_value_and_advantage_in_train: A bool to indicate where value
+        prediction and advantage calculation happen.  If True, both happen in
+        agent.train(), therefore no need to save the value prediction inside of
+        policy info. If False, value prediction is computed during data
+        collection. This argument must be set to `False` if mini batch learning
+        is enabled.
 
     Raises:
-      ValueError: if actor_network or value_network is not of type callable or
-        tensorflow.python.ops.template.Template.
+      ValueError: if actor_network or value_network is not of type
+        tf_agents.networks.network.Network.
     """
-    info_spec = ()
+    if not isinstance(actor_network, network.Network):
+      raise ValueError('actor_network is not of type network.Network')
+    if not isinstance(value_network, network.Network):
+      raise ValueError('value_network is not of type network.Network')
+
+    self._compute_value_and_advantage_in_train = (
+        compute_value_and_advantage_in_train)
+
     if collect:
       # TODO(oars): Cleanup how we handle non distribution networks.
       if isinstance(actor_network, network.DistributionNetwork):
@@ -86,12 +109,31 @@ class PPOPolicy(actor_policy.ActorPolicy):
       else:
         network_output_spec = tf.nest.map_structure(
             distribution_spec.deterministic_distribution_from_spec, action_spec)
-      info_spec = tf.nest.map_structure(lambda spec: spec.input_params_spec,
-                                        network_output_spec)
+      info_spec = {
+          'dist_params':
+              tf.nest.map_structure(lambda spec: spec.input_params_spec,
+                                    network_output_spec)
+      }
+
+      if not self._compute_value_and_advantage_in_train:
+        info_spec['value_prediction'] = tensor_spec.TensorSpec(
+            shape=[], dtype=tf.float32)
+    else:
+      info_spec = ()
+
+    policy_state_spec = {}
+    if actor_network.state_spec:
+      policy_state_spec['actor_network_state'] = actor_network.state_spec
+    if (collect and value_network.state_spec and
+        not self._compute_value_and_advantage_in_train):
+      policy_state_spec['value_network_state'] = value_network.state_spec
+    if not policy_state_spec:
+      policy_state_spec = ()
 
     super(PPOPolicy, self).__init__(
         time_step_spec=time_step_spec,
         action_spec=action_spec,
+        policy_state_spec=policy_state_spec,
         info_spec=info_spec,
         actor_network=actor_network,
         observation_normalizer=observation_normalizer,
@@ -102,7 +144,8 @@ class PPOPolicy(actor_policy.ActorPolicy):
       value_network.create_variables()
     self._value_network = value_network
 
-  def get_initial_value_state(self, batch_size):
+  def get_initial_value_state(self,
+                              batch_size: types.Int) -> types.NestedTensor:
     """Returns the initial state of the value network.
 
     Args:
@@ -116,7 +159,11 @@ class PPOPolicy(actor_policy.ActorPolicy):
         self._value_network.state_spec,
         outer_dims=None if batch_size is None else [batch_size])
 
-  def apply_value_network(self, observations, step_types, value_state=None):
+  def apply_value_network(self,
+                          observations: types.NestedTensor,
+                          step_types: types.Tensor,
+                          value_state: Optional[types.NestedTensor] = None,
+                          training: bool = False) -> types.NestedTensor:
     """Apply value network to time_step, potentially a sequence.
 
     If observation_normalizer is not None, applies observation normalization.
@@ -129,6 +176,7 @@ class PPOPolicy(actor_policy.ActorPolicy):
         observations.
       value_state: Optional. Initial state for the value_network. If not
         provided the behavior depends on the value network itself.
+      training: Whether the output value is going to be used for training.
 
     Returns:
       The output of value_net, which is a tuple of:
@@ -137,16 +185,19 @@ class PPOPolicy(actor_policy.ActorPolicy):
     """
     if self._observation_normalizer:
       observations = self._observation_normalizer.normalize(observations)
-    return self._value_network(observations, step_types, value_state)
+    return self._value_network(observations, step_types, value_state,
+                               training=training)
 
-  def _apply_actor_network(self, time_step, policy_state):
+  def _apply_actor_network(self, time_step, policy_state, training=False):
+    observation = time_step.observation
     if self._observation_normalizer:
-      observation = self._observation_normalizer.normalize(
-          time_step.observation)
-      time_step = ts.TimeStep(time_step.step_type, time_step.reward,
-                              time_step.discount, observation)
+      observation = self._observation_normalizer.normalize(observation)
+
     return self._actor_network(
-        time_step.observation, time_step.step_type, network_state=policy_state)
+        observation,
+        time_step.step_type,
+        network_state=policy_state,
+        training=training)
 
   def _variables(self):
     var_list = self._actor_network.variables[:]
@@ -155,10 +206,18 @@ class PPOPolicy(actor_policy.ActorPolicy):
       var_list += self._observation_normalizer.variables
     return var_list
 
-  def _distribution(self, time_step, policy_state):
-    # Actor network outputs nested structure of distributions or actions.
-    actions_or_distributions, policy_state = self._apply_actor_network(
-        time_step, policy_state)
+  def _distribution(self, time_step, policy_state, training=False):
+    if not policy_state:
+      policy_state = {'actor_network_state': (), 'value_network_state': ()}
+    else:
+      policy_state = policy_state.copy()
+
+    if 'actor_network_state' not in policy_state:
+      policy_state['actor_network_state'] = ()
+    if 'value_network_state' not in policy_state:
+      policy_state['value_network_state'] = ()
+
+    new_policy_state = {'actor_network_state': (), 'value_network_state': ()}
 
     def _to_distribution(action_or_distribution):
       if isinstance(action_or_distribution, tf.Tensor):
@@ -166,13 +225,34 @@ class PPOPolicy(actor_policy.ActorPolicy):
         return tfp.distributions.Deterministic(loc=action_or_distribution)
       return action_or_distribution
 
+    (actions_or_distributions,
+     new_policy_state['actor_network_state']) = self._apply_actor_network(
+         time_step, policy_state['actor_network_state'], training=training)
     distributions = tf.nest.map_structure(_to_distribution,
                                           actions_or_distributions)
 
-    # Prepare policy_info.
     if self._collect:
-      policy_info = ppo_utils.get_distribution_params(distributions)
+      policy_info = {
+          'dist_params': ppo_utils.get_distribution_params(distributions)
+      }
+      if not self._compute_value_and_advantage_in_train:
+        # If value_prediction is not computed in agent.train it needs to be
+        # computed and saved here.
+        (policy_info['value_prediction'],
+         new_policy_state['value_network_state']) = self.apply_value_network(
+             time_step.observation,
+             time_step.step_type,
+             value_state=policy_state['value_network_state'],
+             training=False)
     else:
       policy_info = ()
 
-    return policy_step.PolicyStep(distributions, policy_state, policy_info)
+    if (not new_policy_state['actor_network_state'] and
+        not new_policy_state['value_network_state']):
+      new_policy_state = ()
+    elif not new_policy_state['value_network_state']:
+      new_policy_state.pop('value_network_state', None)
+    elif not new_policy_state['actor_network_state']:
+      new_policy_state.pop('actor_network_state', None)
+
+    return policy_step.PolicyStep(distributions, new_policy_state, policy_info)

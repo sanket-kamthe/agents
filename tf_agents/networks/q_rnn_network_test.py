@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.environments import suite_gym
 from tf_agents.environments import tf_py_environment
@@ -29,17 +29,24 @@ from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step
 
 
+def rnn_keras_fn(lstm_size):
+  cell = tf.keras.layers.SimpleRNNCell(lstm_size)
+  return tf.keras.layers.RNN(cell, return_state=True, return_sequences=True)
+
+
 class QRnnNetworkTest(tf.test.TestCase):
 
   def test_network_builds(self):
     env = suite_gym.load('CartPole-v0')
     tf_env = tf_py_environment.TFPyEnvironment(env)
-    rnn_network = q_rnn_network.QRnnNetwork(tf_env.observation_spec(),
-                                            tf_env.action_spec())
+    rnn_network = q_rnn_network.QRnnNetwork(
+        tf_env.observation_spec(), tf_env.action_spec(), lstm_size=(40,))
 
     first_time_step = tf_env.current_time_step()
     q_values, state = rnn_network(
-        first_time_step.observation, first_time_step.step_type)
+        first_time_step.observation, first_time_step.step_type,
+        network_state=rnn_network.get_initial_state(batch_size=1)
+    )
     self.assertEqual((1, 2), q_values.shape)
     self.assertEqual((1, 40), state[0].shape)
     self.assertEqual((1, 40), state[1].shape)
@@ -67,7 +74,8 @@ class QRnnNetworkTest(tf.test.TestCase):
             [1], tf.int32, 0, num_actions - 1))
     empty_step_type = tf.constant(
         [[time_step.StepType.FIRST] * frames] * batch_size)
-    q_values, _ = network(states, empty_step_type)
+    q_values, _ = network(states, empty_step_type,
+                          network_state=network.get_initial_state(batch_size))
     self.assertAllEqual(
         q_values.shape.as_list(), [batch_size, frames, num_actions])
     # At least 2 variables each for the preprocessing layers.
@@ -94,7 +102,9 @@ class QRnnNetworkTest(tf.test.TestCase):
         action_spec=tensor_spec.BoundedTensorSpec(
             [1], tf.int32, 0, num_actions - 1))
     empty_step_type = tf.constant([time_step.StepType.FIRST] * batch_size)
-    q_values, _ = network(states, empty_step_type)
+    q_values, _ = network(
+        states, empty_step_type,
+        network_state=network.get_initial_state(batch_size=batch_size))
 
     # Processed 1 time step and the time axis was squeezed back.
     self.assertAllEqual(
@@ -111,7 +121,9 @@ class QRnnNetworkTest(tf.test.TestCase):
 
     first_time_step = tf_env.current_time_step()
     q_values, state = rnn_network(
-        first_time_step.observation, first_time_step.step_type)
+        first_time_step.observation, first_time_step.step_type,
+        network_state=rnn_network.get_initial_state(batch_size=1)
+    )
     tf.nest.assert_same_structure(rnn_network.state_spec, state)
     self.assertEqual(2, len(state))
 
@@ -120,6 +132,24 @@ class QRnnNetworkTest(tf.test.TestCase):
     self.assertEqual((1, 10), state[0][1].shape)
     self.assertEqual((1, 5), state[1][0].shape)
     self.assertEqual((1, 5), state[1][1].shape)
+
+  def test_network_builds_rnn_construction_fn(self):
+    env = suite_gym.load('CartPole-v0')
+    tf_env = tf_py_environment.TFPyEnvironment(env)
+    rnn_network = q_rnn_network.QRnnNetwork(
+        tf_env.observation_spec(),
+        tf_env.action_spec(),
+        rnn_construction_fn=rnn_keras_fn,
+        rnn_construction_kwargs={'lstm_size': 3})
+
+    first_time_step = tf_env.current_time_step()
+    q_values, state = rnn_network(
+        first_time_step.observation,
+        first_time_step.step_type,
+        network_state=rnn_network.get_initial_state(batch_size=1),
+    )
+    self.assertEqual((1, 2), q_values.shape)
+    self.assertEqual((3,), state[0].shape)
 
 
 if __name__ == '__main__':

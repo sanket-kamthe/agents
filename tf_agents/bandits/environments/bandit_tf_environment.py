@@ -22,7 +22,7 @@ from __future__ import print_function
 import abc
 import six
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.environments import tf_environment
 from tf_agents.trajectories import time_step as ts
@@ -106,7 +106,8 @@ class BanditTFEnvironment(tf_environment.TFEnvironment):
   @common.function
   def _reset(self):
     current_time_step = ts.restart(
-        self._observe(), batch_size=self.batch_size)
+        self._observe(), batch_size=self.batch_size,
+        reward_spec=self.time_step_spec().reward)
     tf.compat.v1.assign(self._reset_called, True)
     self._update_time_step(current_time_step)
     return current_time_step

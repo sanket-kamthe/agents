@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.environments import mushroom_environment_utilities
 
@@ -33,6 +33,15 @@ class MushroomEnvironmentUtilitiesTest(tf.test.TestCase):
     expected = [[1, 0, 0, 1, 0], [1, 0, 0, 0, 1], [0, 1, 0, 1, 0],
                 [1, 0, 1, 0, 0]]
     np.testing.assert_array_equal(encoded, expected)
+
+  def testRewardDistribution(self):
+    reward_distr = mushroom_environment_utilities.mushroom_reward_distribution(
+        r_noeat=0.0,
+        r_eat_safe=5.0,
+        r_eat_poison_bad=-35.0,
+        r_eat_poison_good=5.0,
+        prob_poison_bad=0.5)
+    np.testing.assert_array_equal(reward_distr.mean(), [[0, -15.], [0, 5.]])
 
 
 if __name__ == '__main__':

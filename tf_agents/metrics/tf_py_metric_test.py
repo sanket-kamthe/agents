@@ -21,7 +21,7 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.metrics import batched_py_metric
 from tf_agents.metrics import py_metrics
 from tf_agents.metrics import tf_py_metric
@@ -82,6 +82,14 @@ class BatchedPyMetricTest(parameterized.TestCase, tf.test.TestCase):
       result = tf_avg_return_metric.result()
     result_ = self.evaluate(result)
     self.assertEqual(result_, expected_reward)
+
+  def testMetricPrefix(self):
+    batched_avg_return_metric = batched_py_metric.BatchedPyMetric(
+        py_metrics.AverageReturnMetric, prefix='CustomPrefix')
+    self.assertEqual(batched_avg_return_metric.prefix, 'CustomPrefix')
+
+    tf_avg_return_metric = tf_py_metric.TFPyMetric(batched_avg_return_metric)
+    self.assertEqual(tf_avg_return_metric._prefix, 'CustomPrefix')
 
   def testReset(self):
     batched_avg_return_metric = batched_py_metric.BatchedPyMetric(

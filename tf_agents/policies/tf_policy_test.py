@@ -22,17 +22,17 @@ from __future__ import print_function
 from absl.testing import parameterized
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 from tf_agents.policies import tf_policy
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import policy_step
 from tf_agents.trajectories import time_step as ts
-from tf_agents.utils import common as common
+from tf_agents.utils import common
 from tf_agents.utils import test_utils
 
 
-class TfPolicyHoldsVariables(tf_policy.Base):
+class TfPolicyHoldsVariables(tf_policy.TFPolicy):
   """Test tf_policy which contains only trainable variables."""
 
   def __init__(self, init_var_value, var_scope, name=None):
@@ -57,13 +57,13 @@ class TfPolicyHoldsVariables(tf_policy.Base):
     return self._variables_list
 
   def _action(self, time_step, policy_state, seed):
-    pass
+    return policy_step.PolicyStep(())
 
   def _distribution(self, time_step, policy_state):
-    pass
+    return policy_step.PolicyStep(())
 
 
-class TFPolicyMismatchedDtypes(tf_policy.Base):
+class TFPolicyMismatchedDtypes(tf_policy.TFPolicy):
   """Dummy tf_policy with mismatched dtypes."""
 
   def __init__(self):
@@ -76,8 +76,11 @@ class TFPolicyMismatchedDtypes(tf_policy.Base):
     # This action's dtype intentionally doesn't match action_spec's dtype.
     return policy_step.PolicyStep(action=tf.constant([0], dtype=tf.int64))
 
+  def _distribution(self, time_step, policy_state):
+    return policy_step.PolicyStep(())
 
-class TFPolicyMismatchedDtypesListAction(tf_policy.Base):
+
+class TFPolicyMismatchedDtypesListAction(tf_policy.TFPolicy):
   """Dummy tf_policy with mismatched dtypes and a list action_spec."""
 
   def __init__(self):
@@ -97,8 +100,11 @@ class TFPolicyMismatchedDtypesListAction(tf_policy.Base):
         tf.constant([0], dtype=tf.int64)
     ])
 
+  def _distribution(self, time_step, policy_state):
+    return policy_step.PolicyStep(())
 
-class TfPassThroughPolicy(tf_policy.Base):
+
+class TfPassThroughPolicy(tf_policy.TFPolicy):
 
   def _action(self, time_step, policy_state, seed):
     distributions = self._distribution(time_step, policy_state)
@@ -112,7 +118,7 @@ class TfPassThroughPolicy(tf_policy.Base):
     return policy_step.PolicyStep(action_distribution, policy_state, ())
 
 
-class TfEmitLogProbsPolicy(tf_policy.Base):
+class TfEmitLogProbsPolicy(tf_policy.TFPolicy):
   """Dummy policy with constant probability distribution."""
 
   def __init__(self, info_spec=()):
@@ -191,6 +197,40 @@ class TfPolicyTest(test_utils.TestCase, parameterized.TestCase):
     self.assertEqual(1, clipped_action[1])
     self.assertEqual(2, clipped_action[2])
     self.assertEqual(1, clipped_action[3])
+
+  def testObservationsContainExtraFields(self):
+    action_spec = {
+        "inp": tensor_spec.TensorSpec([1], tf.float32)
+    }
+    time_step_spec = ts.time_step_spec(observation_spec=action_spec)
+
+    policy = TfPassThroughPolicy(time_step_spec, action_spec, clip=True)
+
+    observation = {"inp": tf.constant(1, shape=(1,), dtype=tf.float32),
+                   "extra": tf.constant(1, shape=(1,), dtype=tf.int32)}
+
+    time_step = ts.restart(observation)
+
+    action = policy.action(time_step).action
+    distribution = policy.distribution(time_step).action
+    tf.nest.assert_same_structure(action, action_spec)
+    tf.nest.assert_same_structure(distribution, action_spec)
+    self.assertEqual(1, self.evaluate(action["inp"]))
+    self.assertEqual(1, self.evaluate(distribution["inp"].sample()))
+
+  def testValidateArgsDisabled(self):
+    action_spec = "blah"
+    time_step_spec = ts.time_step_spec(observation_spec=None)
+    policy = TfPassThroughPolicy(
+        time_step_spec, action_spec, validate_args=False, clip=False)
+    observation = (tf.constant(1, shape=(1,), dtype=tf.float32),
+                   tf.constant(1, shape=(1,), dtype=tf.float32),
+                   tf.constant(1, shape=(1,), dtype=tf.int32),
+                   tf.constant(1, shape=(1,), dtype=tf.int32))
+    time_step = ts.restart(observation)
+
+    action = self.evaluate(policy.action(time_step).action)
+    self.assertAllEqual([[1], [1], [1], [1]], action)
 
   def testMismatchedDtypes(self):
     with self.assertRaisesRegexp(TypeError, ".*dtype that doesn't match.*"):

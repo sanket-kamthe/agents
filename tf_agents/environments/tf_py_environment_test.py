@@ -25,7 +25,7 @@ from absl.testing import parameterized
 from absl.testing.absltest import mock
 import numpy as np
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents import specs
 from tf_agents.environments import batched_py_environment
@@ -95,6 +95,56 @@ class PYEnvironmentMock(py_environment.PyEnvironment):
 
   def observation_spec(self):
     return specs.ArraySpec([], np.int64, name='observation')
+
+  def render(self, mode):
+    if mode == 'rgb_array':
+      return np.ones((4, 4, 3), dtype=np.uint8)
+
+
+class PYEnvironmentMockNestedRewards(py_environment.PyEnvironment):
+  """Mock PyEnvironment with rewards that are nested dicts."""
+
+  def __init__(self):
+    self.last_call_thread_id = threading.current_thread().ident
+    self._state = 0
+    self._observation_spec = self.observation_spec()
+    self._action_spec = self.action_spec()
+    self._reward_spec = self.reward_spec()
+
+  def action_spec(self):
+    return specs.BoundedArraySpec(
+        [], np.int32, minimum=0, maximum=10, name='action')
+
+  def observation_spec(self):
+    return specs.ArraySpec([], np.int64, name='observation')
+
+  def reward_spec(self):
+    return {
+        'reward': specs.ArraySpec([], np.float32, name='reward'),
+        'constraint': specs.ArraySpec([], np.float32, name='constraint')
+    }
+
+  def _reset(self):
+    self._state = 0
+    self.last_call_thread_id = threading.current_thread().ident
+    return ts.restart(
+        [self._state], batch_size=1, reward_spec=self._reward_spec)
+
+  def _step(self, action):
+    self._state = (self._state + 1) % 3
+    self.last_call_thread_id = threading.current_thread().ident
+
+    observation = [self._state]
+    reward = {
+        'constraint': 2.,
+        'reward': 1.,
+    }
+    if self._state == 0:
+      return ts.restart(
+          observation, batch_size=1, reward_spec=self._reward_spec)
+    elif self._state == 2:
+      return ts.termination(observation, reward=reward)
+    return ts.transition(observation, reward=reward)
 
 
 class TFPYEnvironmentTest(tf.test.TestCase, parameterized.TestCase):
@@ -320,6 +370,42 @@ class TFPYEnvironmentTest(tf.test.TestCase, parameterized.TestCase):
       self.assertEqual(init_env_thread, last_env_thread())
       self.evaluate([tf_env.step(tf.constant([1])) for _ in range(16)])
       self.assertEqual(init_env_thread, last_env_thread())
+
+  def testRender(self):
+    py_env = self._get_py_env(False, False, batch_size=None)
+    tf_env = tf_py_environment.TFPyEnvironment(py_env)
+
+    img = self.evaluate(tf_env.render('rgb_array'))
+    self.assertEqual(img.shape, (1, 4, 4, 3))
+    self.assertEqual(img.dtype, np.uint8)
+    img = self.evaluate(tf_env.render('human'))
+    self.assertEqual(img.shape, (1, 4, 4, 3))
+    self.assertEqual(img.dtype, np.uint8)
+
+  def testRenderBatched(self):
+    py_env = self._get_py_env(True, False, batch_size=3)
+    tf_env = tf_py_environment.TFPyEnvironment(py_env)
+
+    img = self.evaluate(tf_env.render('rgb_array'))
+    self.assertEqual(img.shape, (3, 4, 4, 3))
+    self.assertEqual(img.dtype, np.uint8)
+    img = self.evaluate(tf_env.render('human'))
+    self.assertEqual(img.shape, (3, 4, 4, 3))
+    self.assertEqual(img.dtype, np.uint8)
+
+  def testOneStepNestedRewards(self):
+    py_env = PYEnvironmentMockNestedRewards()
+    tf_env = tf_py_environment.TFPyEnvironment(py_env)
+    time_step = tf_env.current_time_step()
+    with tf.control_dependencies([time_step.step_type]):
+      action = tf.constant([1])
+    time_step = self.evaluate(tf_env.step(action))
+
+    self.assertAllEqual([ts.StepType.MID], time_step.step_type)
+    self.assertAllEqual([1.], time_step.reward['reward'])
+    self.assertAllEqual([2.], time_step.reward['constraint'])
+    self.assertAllEqual([1.0], time_step.discount)
+    self.assertAllEqual([1], time_step.observation)
 
 if __name__ == '__main__':
   tf.test.main()

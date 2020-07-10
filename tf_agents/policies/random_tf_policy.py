@@ -16,35 +16,65 @@
 """Policy implementation that generates random actions."""
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
-
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.distributions import masked
 from tf_agents.policies import tf_policy
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import nest_utils
 
 
-def _uniform_probability(action_spec):
-  """Helper function for returning probabilities of equivalent distributions."""
+def _calculate_log_probability(outer_dims, action_spec):
+  """Helper function for calculating log prob of a uniform distribution.
+
+  Each item in the returned tensor will be equal to:
+  |action_spec.shape| * log_prob_of_each_component_of_action_spec.
+
+  Note that this method expects the same value for all outer_dims because
+  we're sampling uniformly from the same distribution for each batch row.
+
+  Args:
+    outer_dims: TensorShape.
+    action_spec: BoundedTensorSpec.
+
+  Returns:
+    A tensor of type float32 with shape outer_dims.
+  """
   # Equivalent of what a tfp.distribution.Categorical would return.
   if action_spec.dtype.is_integer:
-    return 1. / (action_spec.maximum - action_spec.minimum + 1)
+    log_prob = -tf.math.log(action_spec.maximum - action_spec.minimum + 1.0)
   # Equivalent of what a tfp.distribution.Uniform would return.
-  return 1. / (action_spec.maximum - action_spec.minimum)
+  else:
+    log_prob = -tf.math.log(action_spec.maximum - action_spec.minimum)
+
+  # Note that log_prob may be a vector. We first reduce it to a scalar, and then
+  # adjust by the number of times that vector is repeated in action_spec.
+  log_prob = tf.reduce_sum(log_prob) * (
+      action_spec.shape.num_elements() / log_prob.shape.num_elements())
+  # Regardless of the type of the action, the log_prob should be float32.
+  return tf.cast(tf.fill(outer_dims, log_prob), tf.float32)
 
 
-class RandomTFPolicy(tf_policy.Base):
+class RandomTFPolicy(tf_policy.TFPolicy):
   """Returns random samples of the given action_spec.
 
   Note: the values in the info_spec (except for the log_probability) are random
     values that have nothing to do with the emitted actions.
+
+  Note: The returned info.log_probabiliy will be an object matching the
+  structure of action_spec, where each value is a tensor of size [batch_size].
   """
 
-  def __init__(self, time_step_spec, action_spec, *args, **kwargs):
+  def __init__(self, time_step_spec: ts.TimeStep,
+               action_spec: types.NestedTensorSpec, *args, **kwargs):
     observation_and_action_constraint_splitter = (
         kwargs.get('observation_and_action_constraint_splitter', None))
+    self._accepts_per_arm_features = (
+        kwargs.pop('accepts_per_arm_features', False))
 
     if observation_and_action_constraint_splitter is not None:
       if not isinstance(action_spec, tensor_spec.BoundedTensorSpec):
@@ -71,8 +101,9 @@ class RandomTFPolicy(tf_policy.Base):
     observation_and_action_constraint_splitter = (
         self.observation_and_action_constraint_splitter)
 
+    outer_dims = nest_utils.get_outer_shape(time_step, self._time_step_spec)
     if observation_and_action_constraint_splitter is not None:
-      _, mask = observation_and_action_constraint_splitter(
+      observation, mask = observation_and_action_constraint_splitter(
           time_step.observation)
 
       zero_logits = tf.cast(tf.zeros_like(mask), tf.float32)
@@ -84,14 +115,23 @@ class RandomTFPolicy(tf_policy.Base):
       # dimension so the final shape is (B, 1) rather than (B,).
       if self.action_spec.shape.rank == 1:
         action_ = tf.expand_dims(action_, axis=-1)
-      policy_info = tensor_spec.sample_spec_nest(self._info_spec)
+      policy_info = tensor_spec.sample_spec_nest(
+          self._info_spec, outer_dims=outer_dims)
     else:
-      outer_dims = nest_utils.get_outer_shape(time_step, self._time_step_spec)
+      observation = time_step.observation
 
       action_ = tensor_spec.sample_spec_nest(
           self._action_spec, seed=seed, outer_dims=outer_dims)
       policy_info = tensor_spec.sample_spec_nest(
           self._info_spec, outer_dims=outer_dims)
+    if self._accepts_per_arm_features:
+      def _gather_fn(t):
+        return tf.gather(params=t, indices=action_, batch_dims=1)
+
+      chosen_arm_features = tf.nest.map_structure(_gather_fn,
+                                                  observation['per_arm'])
+      policy_info = policy_info._replace(
+          chosen_arm_features=chosen_arm_features)
 
     # TODO(b/78181147): Investigate why this control dependency is required.
     if time_step is not None:
@@ -103,9 +143,9 @@ class RandomTFPolicy(tf_policy.Base):
         log_probability = masked_categorical.log_prob(action_ -
                                                       self.action_spec.minimum)
       else:
-        action_probability = tf.nest.map_structure(_uniform_probability,
-                                                   self._action_spec)
-        log_probability = tf.nest.map_structure(tf.math.log, action_probability)
+        log_probability = tf.nest.map_structure(
+            lambda s: _calculate_log_probability(outer_dims, s),
+            self._action_spec)
       policy_info = policy_step.set_log_probability(policy_info,
                                                     log_probability)
 

@@ -128,7 +128,8 @@ class Test(TestCommandBase):
         return 1
 
     # Run inside absl.app.run to ensure flags parsing is done.
-    return app.run(main)
+    from tf_agents.system import system_multiprocessing as multiprocessing  # pylint: disable=g-import-not-at-top
+    return multiprocessing.handle_test_main(lambda: app.run(main))
 
 
 from tf_agents.version import __dev_version__  # pylint: disable=g-import-not-at-top
@@ -136,22 +137,25 @@ from tf_agents.version import __rel_version__  # pylint: disable=g-import-not-at
 
 REQUIRED_PACKAGES = [
     'absl-py >= 0.6.1',
-    'gin-config == 0.1.3',
+    'cloudpickle == 1.3',  # TODO(b/155109696): Unpin cloudpickle version.
+    'gin-config >= 0.3.0',
     'numpy >= 1.13.3',
     'six >= 1.10.0',
+    'protobuf >= 3.11.3',
+    'wrapt >= 1.11.1',
     # tensorflow-probability added below
 ]
-
 
 TEST_REQUIRED_PACKAGES = [
     'atari_py == 0.1.7',
     'gym == 0.12.5',
+    'mock >= 2.0.0',
     'opencv-python >= 3.4.1.15',
     'pybullet',
     'scipy == 1.1.0',
 ]
 
-REQUIRED_TFP_VERSION = '0.6.0'
+REQUIRED_TFP_VERSION = '0.9.0'
 
 if '--release' in sys.argv:
   release = True
@@ -163,21 +167,28 @@ else:
   version = __dev_version__
   version += datetime.datetime.now().strftime('%Y%m%d')
 
+additional_packages = []
 if release:
   project_name = 'tf-agents'
-  tfp_package_name = 'tensorflow-probability>={}'.format(REQUIRED_TFP_VERSION)
+  additional_packages.append(
+      'tensorflow-probability>={}'.format(REQUIRED_TFP_VERSION))
 else:
   # Nightly releases use date-based versioning of the form
   # '0.0.1.dev20180305'
   project_name = 'tf-agents-nightly'
-  tfp_package_name = 'tfp-nightly'
 
-REQUIRED_PACKAGES.append(tfp_package_name)
+  try:
+    import tensorflow as tf  # pylint: disable=g-import-not-at-top
+  except:
+    raise ValueError('Tensorflow must be installed before installing TFAgents.')
 
-if sys.version_info.major == 2:
-  # mock comes with unittest.mock for python3, need to install for
-  # python2
-  REQUIRED_PACKAGES.append('mock >= 2.0.0')
+  # Force tensorflow_probability at 0.8.0 for TF 1.x compatibility.
+  if tf.__version__.startswith('1'):
+    additional_packages.append('tensorflow-probability==0.8.0')
+  else:
+    additional_packages.append('tfp-nightly')
+
+REQUIRED_PACKAGES.extend(additional_packages)
 
 
 class BinaryDistribution(Distribution):
@@ -204,6 +215,8 @@ setup(
     install_requires=REQUIRED_PACKAGES,
     tests_require=TEST_REQUIRED_PACKAGES,
     extras_require={'tests': TEST_REQUIRED_PACKAGES},
+    # Supports Python 3 only.
+    python_requires='>=3',
     # Add in any packaged data.
     zip_safe=False,
     distclass=BinaryDistribution,
@@ -216,8 +229,6 @@ setup(
         'Intended Audience :: Education',
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: Apache Software License',
-        'Programming Language :: Python :: 2',
-        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',

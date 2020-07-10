@@ -17,29 +17,32 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 
-import collections
 import functools
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.trajectories import policy_step
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import composite
 from tf_agents.utils import nest_utils
 
+from typing import NamedTuple, Optional, Tuple
+
 
 class Trajectory(
-    collections.namedtuple('Trajectory', [
-        'step_type',
-        'observation',
-        'action',
-        'policy_info',
-        'next_step_type',
-        'reward',
-        'discount',
+    NamedTuple('Trajectory', [
+        ('step_type', types.SpecTensorOrArray),
+        ('observation', types.NestedSpecTensorOrArray),
+        ('action', types.NestedSpecTensorOrArray),
+        ('policy_info', types.NestedSpecTensorOrArray),
+        ('next_step_type', types.SpecTensorOrArray),
+        ('reward', types.NestedSpecTensorOrArray),
+        ('discount', types.SpecTensorOrArray),
     ])):
   """A tuple that represents a trajectory.
 
@@ -54,23 +57,24 @@ class Trajectory(
       (tensors) that represents the observation.
     action: An array/a tensor, or a nested dict, list or tuple of actions. This
       represents action generated according to the observation.
-    policy_info: A namedtuple that contains auxiliary information related to the
-      action. Note that this does not include the policy/RNN state which was
-      used to generate the action.
+    policy_info: An arbitrary nest that contains auxiliary information related
+      to the action. Note that this does not include the policy/RNN state which
+      was used to generate the action.
     next_step_type: The `StepType` of the next time step.
-    reward: A scalar representing the reward of performing the action in an
-      environment.
+    reward: An array/a tensor, or a nested dict, list, or tuple of rewards.
+      This represents the rewards and/or constraint satisfiability after
+      performing the action in an environment.
     discount: A scalar that representing the discount factor to multiply with
       future rewards.
   """
   __slots__ = ()
 
-  def is_first(self):
+  def is_first(self) -> types.Bool:
     if tf.is_tensor(self.step_type):
       return tf.equal(self.step_type, ts.StepType.FIRST)
     return self.step_type == ts.StepType.FIRST
 
-  def is_mid(self):
+  def is_mid(self) -> types.Bool:
     if tf.is_tensor(self.step_type):
       return tf.logical_and(
           tf.equal(self.step_type, ts.StepType.MID),
@@ -78,12 +82,12 @@ class Trajectory(
     return (self.step_type == ts.StepType.MID) & (
         self.next_step_type == ts.StepType.MID)
 
-  def is_last(self):
+  def is_last(self) -> types.Bool:
     if tf.is_tensor(self.next_step_type):
       return tf.equal(self.next_step_type, ts.StepType.LAST)
     return self.next_step_type == ts.StepType.LAST
 
-  def is_boundary(self):
+  def is_boundary(self) -> types.Bool:
     if tf.is_tensor(self.step_type):
       return tf.equal(self.step_type, ts.StepType.LAST)
     return self.step_type == ts.StepType.LAST
@@ -169,7 +173,11 @@ def _create_trajectory(
         discount=discount)
 
 
-def first(observation, action, policy_info, reward, discount):
+def first(observation: types.NestedSpecTensorOrArray,
+          action: types.NestedSpecTensorOrArray,
+          policy_info: types.NestedSpecTensorOrArray,
+          reward: types.NestedSpecTensorOrArray,
+          discount: types.SpecTensorOrArray) -> Trajectory:
   """Create a Trajectory transitioning between StepTypes `FIRST` and `MID`.
 
   All inputs may be batched.
@@ -202,7 +210,11 @@ def first(observation, action, policy_info, reward, discount):
                             next_step_type=ts.StepType.MID)
 
 
-def mid(observation, action, policy_info, reward, discount):
+def mid(observation: types.NestedSpecTensorOrArray,
+        action: types.NestedSpecTensorOrArray,
+        policy_info: types.NestedSpecTensorOrArray,
+        reward: types.NestedSpecTensorOrArray,
+        discount: types.SpecTensorOrArray) -> Trajectory:
   """Create a Trajectory transitioning between StepTypes `MID` and `MID`.
 
   All inputs may be batched.
@@ -235,7 +247,11 @@ def mid(observation, action, policy_info, reward, discount):
                             next_step_type=ts.StepType.MID)
 
 
-def last(observation, action, policy_info, reward, discount):
+def last(observation: types.NestedSpecTensorOrArray,
+         action: types.NestedSpecTensorOrArray,
+         policy_info: types.NestedSpecTensorOrArray,
+         reward: types.NestedSpecTensorOrArray,
+         discount: types.SpecTensorOrArray) -> Trajectory:
   """Create a Trajectory transitioning between StepTypes `MID` and `LAST`.
 
   All inputs may be batched.
@@ -268,7 +284,11 @@ def last(observation, action, policy_info, reward, discount):
                             next_step_type=ts.StepType.LAST)
 
 
-def single_step(observation, action, policy_info, reward, discount):
+def single_step(observation: types.NestedSpecTensorOrArray,
+                action: types.NestedSpecTensorOrArray,
+                policy_info: types.NestedSpecTensorOrArray,
+                reward: types.NestedSpecTensorOrArray,
+                discount: types.SpecTensorOrArray) -> Trajectory:
   """Create a Trajectory transitioning between StepTypes `FIRST` and `LAST`.
 
   All inputs may be batched.
@@ -302,7 +322,11 @@ def single_step(observation, action, policy_info, reward, discount):
       next_step_type=ts.StepType.LAST)
 
 
-def boundary(observation, action, policy_info, reward, discount):
+def boundary(observation: types.NestedSpecTensorOrArray,
+             action: types.NestedSpecTensorOrArray,
+             policy_info: types.NestedSpecTensorOrArray,
+             reward: types.NestedSpecTensorOrArray,
+             discount: types.SpecTensorOrArray) -> Trajectory:
   """Create a Trajectory transitioning between StepTypes `LAST` and `FIRST`.
 
   All inputs may be batched.
@@ -359,7 +383,12 @@ def _maybe_static_outer_dim(t):
     return outer_dim if outer_dim is not None else tf.shape(t)[0]
 
 
-def from_episode(observation, action, policy_info, reward, discount=None):
+def from_episode(
+    observation: types.NestedSpecTensorOrArray,
+    action: types.NestedSpecTensorOrArray,
+    policy_info: types.NestedSpecTensorOrArray,
+    reward: types.NestedSpecTensorOrArray,
+    discount: Optional[types.SpecTensorOrArray] = None) -> Trajectory:
   """Create a Trajectory from tensors representing a single episode.
 
   If none of the inputs are tensors, then numpy arrays are generated instead.
@@ -470,7 +499,9 @@ def from_episode(observation, action, policy_info, reward, discount=None):
     return _from_episode(observation, action, policy_info, reward, discount)
 
 
-def from_transition(time_step, action_step, next_time_step):
+def from_transition(time_step: ts.TimeStep,
+                    action_step: policy_step.PolicyStep,
+                    next_time_step: ts.TimeStep) -> Trajectory:
   """Returns a `Trajectory` given transitions.
 
   `from_transition` is used by a driver to convert sequence of transitions into
@@ -501,7 +532,10 @@ def from_transition(time_step, action_step, next_time_step):
       discount=next_time_step.discount)
 
 
-def to_transition(trajectory, next_trajectory=None):
+def to_transition(
+    trajectory: Trajectory,
+    next_trajectory: Optional[Trajectory] = None
+) -> Tuple[ts.TimeStep, policy_step.PolicyStep, ts.TimeStep]:
   """Create a transition from a trajectory or two adjacent trajectories.
 
   **NOTE** If `next_trajectory` is not provided, tensors of `trajectory` are
@@ -519,15 +553,22 @@ def to_transition(trajectory, next_trajectory=None):
   Notice that reward and discount for time_steps are undefined, therefore filled
   with zero.
 
+  TODO(b/155302755): Update the rank validation check for discount.
+
   Args:
     trajectory: An instance of `Trajectory`. The tensors in Trajectory must have
-      shape `[ B, T, ...]` when next_trajectory is None.
+      shape `[B, T, ...]` when next_trajectory is `None`.  `discount` is assumed
+      to be a scalar float; hence the shape of `trajectory.discount` must
+      be `[B, T]`.
     next_trajectory: (optional) An instance of `Trajectory`.
 
   Returns:
     A tuple `(time_steps, policy_steps, next_time_steps)`.  The `reward` and
     `discount` fields of `time_steps` are filled with zeros because these
     cannot be deduced (please do not use them).
+
+  Raises:
+    ValueError: if `discount` rank is not within the range [1, 2].
   """
   _validate_rank(trajectory.discount, min_rank=1, max_rank=2)
 
@@ -552,10 +593,12 @@ def to_transition(trajectory, next_trajectory=None):
       reward=trajectory.reward,
       discount=trajectory.discount,
       observation=next_trajectory.observation)
-  return [time_steps, policy_steps, next_time_steps]
+  return (time_steps, policy_steps, next_time_steps)
 
 
-def to_transition_spec(trajectory_spec):
+def to_transition_spec(
+    trajectory_spec: Trajectory
+) -> Tuple[ts.TimeStep, policy_step.PolicyStep, ts.TimeStep]:
   """Create a transition spec from a trajectory spec.
 
   Args:
@@ -571,7 +614,7 @@ def to_transition_spec(trajectory_spec):
       reward=trajectory_spec.reward,
       discount=trajectory_spec.discount,
       observation=trajectory_spec.observation)
-  return [time_step_spec, policy_step_spec, time_step_spec]
+  return (time_step_spec, policy_step_spec, time_step_spec)
 
 
 def _validate_rank(variable, min_rank, max_rank=None):
@@ -590,3 +633,16 @@ def _validate_rank(variable, min_rank, max_rank=None):
     raise ValueError(
         'Expect variable within rank [{},{}], but got rank {}.'.format(
             min_rank, max_rank, rank))
+
+
+def experience_to_transitions(
+    experience: Trajectory, squeeze_time_dim: bool
+) -> Tuple[ts.TimeStep, policy_step.PolicyStep, ts.TimeStep]:
+  """Break experience to transitions."""
+  transitions = to_transition(experience)
+
+  if squeeze_time_dim:
+    transitions = tf.nest.map_structure(lambda x: composite.squeeze(x, 1),
+                                        transitions)
+  time_steps, policy_steps, next_time_steps = transitions
+  return time_steps, policy_steps, next_time_steps

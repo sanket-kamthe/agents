@@ -24,12 +24,15 @@ from __future__ import division
 from __future__ import print_function
 
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.agents import greedy_reward_prediction_agent
+from tf_agents.bandits.networks import heteroscedastic_q_network
 from tf_agents.networks import q_network
 
 
+# TODO(b/146206372): refactor DropoutThompsonSamplingAgent API to be compliant
+# with other APIs which take a reward network at initialisation
 @gin.configurable
 class DropoutThompsonSamplingAgent(
     greedy_reward_prediction_agent.GreedyRewardPredictionAgent):
@@ -50,17 +53,24 @@ class DropoutThompsonSamplingAgent(
       network_layers,
       dropout_only_top_layer=True,
       observation_and_action_constraint_splitter=None,
+      constraints=(),
       # Params for training.
       error_loss_fn=tf.compat.v1.losses.mean_squared_error,
       gradient_clipping=None,
+      heteroscedastic=False,
       # Params for debugging.
       debug_summaries=False,
       summarize_grads_and_vars=False,
       enable_summaries=True,
       emit_policy_info=(),
       train_step_counter=None,
+      laplacian_matrix=None,
+      laplacian_smoothing_weight=0.001,
       name=None):
     """Creates a Dropout Thompson Sampling Agent.
+
+    For more details about the Laplacian smoothing regularization, please see
+    the documentation of the `GreedyRewardPredictionAgent`.
 
     Args:
       time_step_spec: A `TimeStep` spec of the expected time_steps.
@@ -77,11 +87,15 @@ class DropoutThompsonSamplingAgent(
         policy, and 2) the boolean mask. This function should also work with a
         `TensorSpec` as input, and should output `TensorSpec` objects for the
         observation and mask.
+      constraints: iterable of constraints objects that are instances of
+        `tf_agents.bandits.agents.NeuralConstraint`.
       error_loss_fn: A function for computing the error loss, taking parameters
         labels, predictions, and weights (any function from tf.losses would
         work). The default is `tf.losses.mean_squared_error`.
       gradient_clipping: A float representing the norm length to clip gradients
         (or None for no clipping.)
+      heteroscedastic: If True, the variance per action is estimated and the
+        losses are weighted appropriately.
       debug_summaries: A Python bool, default False. When True, debug summaries
         are gathered.
       summarize_grads_and_vars: A Python bool, default False. When True,
@@ -93,6 +107,14 @@ class DropoutThompsonSamplingAgent(
         `policy_utilities.PolicyInfo`.
       train_step_counter: An optional `tf.Variable` to increment every time the
         train op is run.  Defaults to the `global_step`.
+      laplacian_matrix: A float `Tensor` shaped `[num_actions, num_actions]`.
+        This holds the Laplacian matrix used to regularize the smoothness of the
+        estimated expected reward function. This only applies to problems where
+        the actions have a graph structure. If `None`, the regularization is not
+        applied.
+      laplacian_smoothing_weight: A float that determines the weight of the
+        regularization term. Note that this has no effect if `laplacian_matrix`
+        above is `None`.
       name: Python str name of this agent. All variables in this module will
         fall under that name. Defaults to the class name.
 
@@ -112,11 +134,19 @@ class DropoutThompsonSamplingAgent(
           time_step_spec.observation)
     else:
       input_tensor_spec = time_step_spec.observation
-    reward_network = q_network.QNetwork(
-        input_tensor_spec=input_tensor_spec,
-        action_spec=action_spec,
-        fc_layer_params=fc_layer_params,
-        dropout_layer_params=dropout_layer_params)
+
+    if heteroscedastic:
+      reward_network = heteroscedastic_q_network.HeteroscedasticQNetwork(
+          input_tensor_spec=input_tensor_spec,
+          action_spec=action_spec,
+          fc_layer_params=fc_layer_params,
+          dropout_layer_params=dropout_layer_params)
+    else:
+      reward_network = q_network.QNetwork(
+          input_tensor_spec=input_tensor_spec,
+          action_spec=action_spec,
+          fc_layer_params=fc_layer_params,
+          dropout_layer_params=dropout_layer_params)
 
     super(DropoutThompsonSamplingAgent, self).__init__(
         time_step_spec=time_step_spec,
@@ -125,6 +155,7 @@ class DropoutThompsonSamplingAgent(
         optimizer=optimizer,
         observation_and_action_constraint_splitter=(
             observation_and_action_constraint_splitter),
+        constraints=constraints,
         error_loss_fn=error_loss_fn,
         gradient_clipping=gradient_clipping,
         debug_summaries=debug_summaries,
@@ -132,4 +163,6 @@ class DropoutThompsonSamplingAgent(
         enable_summaries=enable_summaries,
         emit_policy_info=emit_policy_info,
         train_step_counter=train_step_counter,
+        laplacian_matrix=laplacian_matrix,
+        laplacian_smoothing_weight=laplacian_smoothing_weight,
         name=name)

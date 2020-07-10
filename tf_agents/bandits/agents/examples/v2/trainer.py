@@ -22,7 +22,7 @@ from __future__ import print_function
 import os
 from absl import logging
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.drivers import dynamic_step_driver
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import tf_metrics
@@ -36,10 +36,12 @@ STEP_CHECKPOINT_NAME = 'step'
 CHECKPOINT_FILE_PREFIX = 'ckpt'
 
 
-def get_replay_buffer(agent, batch_size, steps_per_loop):
+def get_replay_buffer(data_spec,
+                      batch_size,
+                      steps_per_loop):
   """Return a `TFUniformReplayBuffer` for the given `agent`."""
   buf = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-      data_spec=agent.policy.trajectory_spec,
+      data_spec=data_spec,
       batch_size=batch_size,
       max_length=steps_per_loop)
   return buf
@@ -104,7 +106,8 @@ def train(root_dir,
           environment,
           training_loops,
           steps_per_loop,
-          additional_metrics=()):
+          additional_metrics=(),
+          training_data_spec_transformation_fn=None):
   """Perform `training_loops` iterations of training.
 
   Checkpoint results.
@@ -128,22 +131,42 @@ def train(root_dir,
     additional_metrics: Tuple of metric objects to log, in addition to default
       metrics `NumberOfEpisodes`, `AverageReturnMetric`, and
       `AverageEpisodeLengthMetric`.
+    training_data_spec_transformation_fn: Optional function that transforms the
+    data items before they get to the replay buffer.
   """
 
   # TODO(b/127641485): create evaluation loop with configurable metrics.
+  if training_data_spec_transformation_fn is None:
+    data_spec = agent.policy.trajectory_spec
+  else:
+    data_spec = training_data_spec_transformation_fn(
+        agent.policy.trajectory_spec)
+  replay_buffer = get_replay_buffer(data_spec, environment.batch_size,
+                                    steps_per_loop)
 
-  replay_buffer = get_replay_buffer(
-      agent, environment.batch_size, steps_per_loop)
   # `step_metric` records the number of individual rounds of bandit interaction;
   # that is, (number of trajectories) * batch_size.
   step_metric = tf_metrics.EnvironmentSteps()
   metrics = [
       tf_metrics.NumberOfEpisodes(),
-      tf_metrics.AverageReturnMetric(batch_size=environment.batch_size),
       tf_metrics.AverageEpisodeLengthMetric(batch_size=environment.batch_size)
   ] + list(additional_metrics)
 
-  observers = [replay_buffer.add_batch] + [step_metric] + metrics
+  if isinstance(environment.reward_spec(), dict):
+    metrics += [tf_metrics.AverageReturnMultiMetric(
+        reward_spec=environment.reward_spec(),
+        batch_size=environment.batch_size)]
+  else:
+    metrics += [
+        tf_metrics.AverageReturnMetric(batch_size=environment.batch_size)]
+
+  if training_data_spec_transformation_fn is not None:
+    add_batch_fn = lambda data: replay_buffer.add_batch(  # pylint: disable=g-long-lambda
+        training_data_spec_transformation_fn(data))
+  else:
+    add_batch_fn = replay_buffer.add_batch
+
+  observers = [add_batch_fn, step_metric] + metrics
 
   driver = dynamic_step_driver.DynamicStepDriver(
       env=environment,
@@ -163,7 +186,6 @@ def train(root_dir,
     training_loop()
     metric_utils.log_metrics(metrics)
     for metric in metrics:
-      tf.summary.scalar(
-          metric.name, metric.result(), step=step_metric.result())
+      metric.tf_summaries(train_step=step_metric.result())
     checkpoint_manager.save()
     saver.save(os.path.join(root_dir, 'policy_%d' % step_metric.result()))

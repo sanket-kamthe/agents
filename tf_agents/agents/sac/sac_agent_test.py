@@ -19,8 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import copy
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import critic_rnn_network
 from tf_agents.agents.sac import sac_agent
@@ -62,8 +61,9 @@ class DummyActorPolicy(object):
     self._action_spec = action_spec
 
   def action(self, time_step):
-    del time_step
-    action = tf.constant(self._action, dtype=tf.float32, shape=[1])
+    observation = time_step.observation
+    batch_size = observation.shape[0]
+    action = tf.constant(self._action, dtype=tf.float32, shape=[batch_size, 1])
     return PolicyStep(action=action)
 
   def distribution(self, time_step, policy_state=()):
@@ -78,32 +78,45 @@ class DummyActorPolicy(object):
 
 class DummyCriticNet(network.Network):
 
-  def __init__(self):
+  def __init__(self, l2_regularization_weight=0.0, shared_layer=None):
     super(DummyCriticNet, self).__init__(
-        input_tensor_spec=(tensor_spec.TensorSpec([], tf.float32),
-                           tensor_spec.TensorSpec([], tf.float32)),
-        state_spec=(), name=None)
+        input_tensor_spec=(tensor_spec.TensorSpec([2], tf.float32),
+                           tensor_spec.TensorSpec([1], tf.float32)),
+        state_spec=(),
+        name=None)
+    self._l2_regularization_weight = l2_regularization_weight
+    self._value_layer = tf.keras.layers.Dense(
+        1,
+        kernel_regularizer=tf.keras.regularizers.l2(l2_regularization_weight),
+        kernel_initializer=tf.compat.v1.initializers.constant([[0], [1]]),
+        bias_initializer=tf.compat.v1.initializers.constant([[0]]))
+    self._shared_layer = shared_layer
+    self._action_layer = tf.keras.layers.Dense(
+        1,
+        kernel_regularizer=tf.keras.regularizers.l2(l2_regularization_weight),
+        kernel_initializer=tf.compat.v1.initializers.constant([[1]]),
+        bias_initializer=tf.compat.v1.initializers.constant([[0]]))
 
   def copy(self, name=''):
     del name
-    return copy.copy(self)
+    return DummyCriticNet(
+        l2_regularization_weight=self._l2_regularization_weight,
+        shared_layer=self._shared_layer)
 
   def call(self, inputs, step_type, network_state=()):
     del step_type
-    del network_state
     observation, actions = inputs
     actions = tf.cast(tf.nest.flatten(actions)[0], tf.float32)
 
     states = tf.cast(tf.nest.flatten(observation)[0], tf.float32)
-    # Biggest state is best state.
-    value = tf.reduce_max(input_tensor=states, axis=-1)
-    value = tf.reshape(value, [-1])
 
-    # Biggest action is best action.
-    q_value = tf.reduce_max(input_tensor=actions, axis=-1)
-    q_value = tf.reshape(q_value, [-1])
+    s_value = self._value_layer(states)
+    if self._shared_layer:
+      s_value = self._shared_layer(s_value)
+    a_value = self._action_layer(actions)
     # Biggest state is best state.
-    return value + q_value, ()
+    q_value = tf.reshape(s_value + a_value, [-1])
+    return q_value, network_state
 
 
 class SacAgentTest(test_utils.TestCase):
@@ -158,7 +171,40 @@ class SacAgentTest(test_utils.TestCase):
         time_steps,
         actions,
         next_time_steps,
-        td_errors_loss_fn=tf.compat.v1.losses.mean_squared_error)
+        td_errors_loss_fn=tf.math.squared_difference)
+
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    loss_ = self.evaluate(loss)
+    self.assertAllClose(loss_, expected_loss)
+
+  def testCriticRegLoss(self):
+    agent = sac_agent.SacAgent(
+        self._time_step_spec,
+        self._action_spec,
+        critic_network=DummyCriticNet(0.5),
+        actor_network=None,
+        actor_optimizer=None,
+        critic_optimizer=None,
+        alpha_optimizer=None,
+        actor_policy_ctor=DummyActorPolicy)
+
+    observations = tf.zeros((2, 2), dtype=tf.float32)
+    time_steps = ts.restart(observations, batch_size=2)
+    actions = tf.zeros((2, 1), dtype=tf.float32)
+
+    rewards = tf.zeros((2,), dtype=tf.float32)
+    discounts = tf.zeros((2,), dtype=tf.float32)
+    next_observations = tf.zeros((2, 2), dtype=tf.float32)
+    next_time_steps = ts.transition(next_observations, rewards, discounts)
+
+    # Expected loss only regularization loss.
+    expected_loss = 2.0
+
+    loss = agent.critic_loss(
+        time_steps,
+        actions,
+        next_time_steps,
+        td_errors_loss_fn=tf.math.squared_difference)
 
     self.evaluate(tf.compat.v1.global_variables_initializer())
     loss_ = self.evaluate(loss)
@@ -218,7 +264,7 @@ class SacAgentTest(test_utils.TestCase):
         alpha_optimizer=None,
         actor_policy_ctor=DummyActorPolicy)
 
-    observations = tf.constant([1, 2], dtype=tf.float32)
+    observations = tf.constant([[1, 2]], dtype=tf.float32)
     time_steps = ts.restart(observations)
     action_step = agent.policy.action(time_steps)
 
@@ -277,15 +323,70 @@ class SacAgentTest(test_utils.TestCase):
 
     # Force variable creation.
     agent.policy.variables()
-    if tf.executing_eagerly():
-      loss = lambda: agent.train(experience)
-    else:
-      loss = agent.train(experience)
 
-    self.evaluate(tf.compat.v1.global_variables_initializer())
-    self.assertEqual(self.evaluate(counter), 0)
-    self.evaluate(loss)
-    self.assertEqual(self.evaluate(counter), 1)
+    if not tf.executing_eagerly():
+      # Get experience first to make sure optimizer variables are created and
+      # can be initialized.
+      experience = agent.train(experience)
+      with self.cached_session() as sess:
+        common.initialize_uninitialized_variables(sess)
+      self.assertEqual(self.evaluate(counter), 0)
+      self.evaluate(experience)
+      self.assertEqual(self.evaluate(counter), 1)
+    else:
+      self.assertEqual(self.evaluate(counter), 0)
+      self.evaluate(agent.train(experience))
+      self.assertEqual(self.evaluate(counter), 1)
+
+  def testSharedLayer(self):
+    shared_layer = tf.keras.layers.Dense(
+        1,
+        kernel_initializer=tf.compat.v1.initializers.constant([0]),
+        bias_initializer=tf.compat.v1.initializers.constant([0]),
+        name='shared')
+
+    critic_net_1 = DummyCriticNet(shared_layer=shared_layer)
+    critic_net_2 = DummyCriticNet(shared_layer=shared_layer)
+
+    target_shared_layer = tf.keras.layers.Dense(
+        1,
+        kernel_initializer=tf.compat.v1.initializers.constant([0]),
+        bias_initializer=tf.compat.v1.initializers.constant([0]),
+        name='shared_target')
+
+    target_critic_net_1 = DummyCriticNet(shared_layer=target_shared_layer)
+    target_critic_net_2 = DummyCriticNet(shared_layer=target_shared_layer)
+
+    agent = sac_agent.SacAgent(
+        self._time_step_spec,
+        self._action_spec,
+        critic_network=critic_net_1,
+        critic_network_2=critic_net_2,
+        target_critic_network=target_critic_net_1,
+        target_critic_network_2=target_critic_net_2,
+        actor_network=None,
+        actor_optimizer=None,
+        critic_optimizer=None,
+        alpha_optimizer=None,
+        target_entropy=3.0,
+        initial_log_alpha=4.0,
+        target_update_tau=0.5,
+        actor_policy_ctor=DummyActorPolicy)
+
+    self.evaluate([
+        tf.compat.v1.global_variables_initializer(),
+        tf.compat.v1.local_variables_initializer()
+    ])
+
+    self.evaluate(agent.initialize())
+
+    for v in shared_layer.variables:
+      self.evaluate(v.assign(v * 0 + 1))
+
+    self.evaluate(agent._update_target())
+
+    self.assertEqual(1.0, self.evaluate(shared_layer.variables[0][0][0]))
+    self.assertEqual(0.5, self.evaluate(target_shared_layer.variables[0][0][0]))
 
 
 if __name__ == '__main__':

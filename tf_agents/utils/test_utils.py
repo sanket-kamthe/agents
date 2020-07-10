@@ -25,7 +25,7 @@ from absl import flags
 
 import gin
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 
 FLAGS = flags.FLAGS
@@ -81,6 +81,10 @@ class TestCase(tf.test.TestCase):
   def tearDown(self):
     gin.clear_config()
     super(TestCase, self).tearDown()
+
+  def initialize_v1_variables(self):
+    variables = tf.compat.v1.global_variables() + tf.compat.v1.local_variables()
+    self.evaluate(tf.compat.v1.variables_initializer(variables))
 
 
 # Main function so that users of `test_utils.TestCase` can also call

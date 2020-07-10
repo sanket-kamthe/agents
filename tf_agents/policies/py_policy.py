@@ -17,19 +17,25 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+
 import abc
+from typing import Optional
+
 import numpy as np
 import six
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.trajectories import policy_step
+from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
+from tf_agents.typing import types
 from tf_agents.utils import common
 
 
 @six.add_metaclass(abc.ABCMeta)
-class Base(object):
+class PyPolicy(object):
   """Abstract base class for Python Policies.
 
   The `action(time_step, policy_state)` method returns a PolicyStep named tuple
@@ -60,44 +66,43 @@ class Base(object):
 
   # TODO(kbanoop): Expose a batched/batch_size property.
   def __init__(self,
-               time_step_spec,
-               action_spec,
-               policy_state_spec=(),
-               info_spec=(),
-               observation_and_action_constraint_splitter=None):
-    """Initialization of Base class.
+               time_step_spec: ts.TimeStep,
+               action_spec: types.NestedArraySpec,
+               policy_state_spec: types.NestedArraySpec = (),
+               info_spec: types.NestedArraySpec = (),
+               observation_and_action_constraint_splitter: Optional[
+                   types.Splitter] = None):
+    """Initialization of PyPolicy class.
 
     Args:
-      time_step_spec: A `TimeStep` ArraySpec of the expected time_steps.
-        Usually provided by the user to the subclass.
-      action_spec: A nest of BoundedArraySpec representing the actions.
-        Usually provided by the user to the subclass.
+      time_step_spec: A `TimeStep` ArraySpec of the expected time_steps. Usually
+        provided by the user to the subclass.
+      action_spec: A nest of BoundedArraySpec representing the actions. Usually
+        provided by the user to the subclass.
       policy_state_spec: A nest of ArraySpec representing the policy state.
         Provided by the subclass, not directly by the user.
-      info_spec: A nest of ArraySpec representing the policy info.
-        Provided by the subclass, not directly by the user.
+      info_spec: A nest of ArraySpec representing the policy info. Provided by
+        the subclass, not directly by the user.
       observation_and_action_constraint_splitter: A function used to process
         observations with action constraints. These constraints can indicate,
         for example, a mask of valid/invalid actions for a given state of the
-        environment.
-        The function takes in a full observation and returns a tuple consisting
-        of 1) the part of the observation intended as input to the network and
-        2) the constraint. An example
-        `observation_and_action_constraint_splitter` could be as simple as:
-        ```
-        def observation_and_action_constraint_splitter(observation):
-          return observation['network_input'], observation['constraint']
-        ```
+        environment. The function takes in a full observation and returns a
+        tuple consisting of 1) the part of the observation intended as input to
+        the network and 2) the constraint. An example
+        `observation_and_action_constraint_splitter` could be as simple as: ```
+        def observation_and_action_constraint_splitter(observation): return
+          observation['network_input'], observation['constraint'] ```
         *Note*: when using `observation_and_action_constraint_splitter`, make
-        sure the provided `q_network` is compatible with the network-specific
-        half of the output of the `observation_and_action_constraint_splitter`.
-        In particular, `observation_and_action_constraint_splitter` will be
-        called on the observation before passing to the network.
-        If `observation_and_action_constraint_splitter` is None, action
-        constraints are not applied.
+          sure the provided `q_network` is compatible with the network-specific
+          half of the output of the
+          `observation_and_action_constraint_splitter`. In particular,
+          `observation_and_action_constraint_splitter` will be called on the
+          observation before passing to the network. If
+          `observation_and_action_constraint_splitter` is None, action
+          constraints are not applied.
     """
     common.tf_agents_gauge.get_cell('TFAPolicy').set(True)
-    common.assert_members_are_not_overridden(base_cls=Base, instance=self)
+    common.assert_members_are_not_overridden(base_cls=PyPolicy, instance=self)
     self._time_step_spec = time_step_spec
     self._action_spec = action_spec
     # TODO(kbanoop): rename policy_state to state.
@@ -113,12 +118,15 @@ class Base(object):
         info=self._info_spec)
     self._trajectory_spec = trajectory.from_transition(
         self._time_step_spec, self._policy_step_spec, self._time_step_spec)
+    self._collect_data_spec = self._trajectory_spec
 
   @property
-  def observation_and_action_constraint_splitter(self):
+  def observation_and_action_constraint_splitter(
+      self) -> Optional[types.Splitter]:
     return self._observation_and_action_constraint_splitter
 
-  def get_initial_state(self, batch_size=None):
+  def get_initial_state(self,
+                        batch_size: Optional[int] = None) -> types.NestedArray:
     """Returns an initial state usable by the policy.
 
     Args:
@@ -129,7 +137,9 @@ class Base(object):
     """
     return self._get_initial_state(batch_size)
 
-  def action(self, time_step, policy_state=()):
+  def action(
+      self, time_step: ts.TimeStep, policy_state: types.NestedArray = ()
+  ) -> policy_step.PolicyStep:
     """Generates next action given the time_step and policy_state.
 
 
@@ -146,7 +156,7 @@ class Base(object):
     return self._action(time_step, policy_state)
 
   @property
-  def time_step_spec(self):
+  def time_step_spec(self) -> ts.TimeStep:
     """Describes the `TimeStep` np.Arrays expected by `action(time_step)`.
 
     Returns:
@@ -157,7 +167,7 @@ class Base(object):
     return self._time_step_spec
 
   @property
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     """Describes the ArraySpecs of the np.Array returned by `action()`.
 
     `action` can be a single np.Array, or a nested dict, list or tuple of
@@ -171,7 +181,7 @@ class Base(object):
     return self._action_spec
 
   @property
-  def policy_state_spec(self):
+  def policy_state_spec(self) -> types.NestedArraySpec:
     """Describes the arrays expected by functions with `policy_state` as input.
 
     Returns:
@@ -182,7 +192,7 @@ class Base(object):
     return self._policy_state_spec
 
   @property
-  def info_spec(self):
+  def info_spec(self) -> types.NestedArraySpec:
     """Describes the Arrays emitted as info by `action()`.
 
     Returns:
@@ -192,7 +202,7 @@ class Base(object):
     return self._info_spec
 
   @property
-  def policy_step_spec(self):
+  def policy_step_spec(self) -> policy_step.PolicyStep:
     """Describes the output of `action()`.
 
     Returns:
@@ -202,7 +212,7 @@ class Base(object):
     return self._policy_step_spec
 
   @property
-  def trajectory_spec(self):
+  def trajectory_spec(self) -> trajectory.Trajectory:
     """Describes the data collected when using this policy with an environment.
 
     Returns:
@@ -211,8 +221,19 @@ class Base(object):
     """
     return self._trajectory_spec
 
+  @property
+  def collect_data_spec(self) -> trajectory.Trajectory:
+    """Describes the data collected when using this policy with an environment.
+
+    Returns:
+      A nest of ArraySpecs which describe the shape and dtype of each array
+      required to train the agent which generated this policy.
+    """
+    return self._collect_data_spec
+
   @abc.abstractmethod
-  def _action(self, time_step, policy_state):
+  def _action(self, time_step: ts.TimeStep,
+              policy_state: types.NestedArray) -> policy_step.PolicyStep:
     """Implementation of `action`.
 
     Args:
@@ -227,7 +248,7 @@ class Base(object):
         `info`: Optional side information such as action log probabilities.
     """
 
-  def _get_initial_state(self, batch_size):
+  def _get_initial_state(self, batch_size: int) -> types.NestedArray:
     """Default implementation of `get_initial_state`.
 
     This implementation returns arrays of all zeros matching `batch_size` and

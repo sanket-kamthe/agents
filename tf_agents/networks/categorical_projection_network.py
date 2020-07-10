@@ -20,7 +20,7 @@ from __future__ import print_function
 
 import gin
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 
 from tf_agents.networks import network
@@ -98,7 +98,7 @@ class CategoricalProjectionNetwork(network.DistributionNetwork):
         sample_spec=sample_spec,
         dtype=sample_spec.dtype)
 
-  def call(self, inputs, outer_rank):
+  def call(self, inputs, outer_rank, training=False, mask=None):
     # outer_rank is needed because the projection is not done on the raw
     # observations so getting the outer rank is hard as there is no spec to
     # compare to.
@@ -106,8 +106,20 @@ class CategoricalProjectionNetwork(network.DistributionNetwork):
     inputs = batch_squash.flatten(inputs)
     inputs = tf.cast(inputs, tf.float32)
 
-    logits = self._projection_layer(inputs)
+    logits = self._projection_layer(inputs, training=training)
     logits = tf.reshape(logits, [-1] + self._output_shape.as_list())
     logits = batch_squash.unflatten(logits)
 
-    return self.output_spec.build_distribution(logits=logits)
+    if mask is not None:
+      # If the action spec says each action should be shaped (1,), add another
+      # dimension so the final shape is (B, 1, A), where A is the number of
+      # actions. This will make Categorical emit events shaped (B, 1) rather
+      # than (B,). Using axis -2 to allow for (B, T, 1, A) shaped q_values.
+      if mask.shape.rank < logits.shape.rank:
+        mask = tf.expand_dims(mask, -2)
+
+      # Overwrite the logits for invalid actions to -inf.
+      neg_inf = tf.constant(-np.inf, dtype=logits.dtype)
+      logits = tf.compat.v2.where(tf.cast(mask, tf.bool), logits, neg_inf)
+
+    return self.output_spec.build_distribution(logits=logits), ()

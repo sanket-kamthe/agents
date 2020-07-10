@@ -19,9 +19,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.agents import neural_epsilon_greedy_agent
+from tf_agents.bandits.networks import global_and_arm_feature_network
+from tf_agents.bandits.specs import utils as bandit_spec_utils
 from tf_agents.networks import network
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
@@ -31,23 +33,26 @@ from tensorflow.python.framework import test_util  # pylint:disable=g-direct-ten
 
 class DummyNet(network.Network):
 
-  def __init__(self, unused_observation_spec, action_spec, name=None):
-    super(DummyNet, self).__init__(
-        unused_observation_spec, state_spec=(), name=name)
+  def __init__(self, observation_spec, action_spec, name=None):
+    super(DummyNet, self).__init__(observation_spec, state_spec=(), name=name)
     action_spec = tf.nest.flatten(action_spec)[0]
     num_actions = action_spec.maximum - action_spec.minimum + 1
-    self._layers.append(
+
+    # Store custom layers that can be serialized through the Checkpointable API.
+    self._dummy_layers = [
         tf.keras.layers.Dense(
             num_actions,
             kernel_initializer=tf.compat.v1.initializers.constant(
                 [[1, 1.5, 2],
                  [1, 1.5, 4]]),
             bias_initializer=tf.compat.v1.initializers.constant(
-                [[1], [1], [-10]])))
+                [[1], [1], [-10]]))
+    ]
 
-  def call(self, inputs, unused_step_type=None, network_state=()):
+  def call(self, inputs, step_type=None, network_state=()):
+    del step_type
     inputs = tf.cast(inputs, tf.float32)
-    for layer in self.layers:
+    for layer in self._dummy_layers:
       inputs = layer(inputs)
     return inputs, network_state
 
@@ -104,6 +109,34 @@ class AgentTest(tf.test.TestCase):
     self.evaluate(tf.compat.v1.global_variables_initializer())
     actions = self.evaluate(action_step.action)
     self.assertAllEqual(actions, [2, 1])
+
+  def testTrainPerArmAgent(self):
+    obs_spec = bandit_spec_utils.create_per_arm_observation_spec(2, 3, 3)
+    time_step_spec = ts.time_step_spec(obs_spec)
+    reward_net = (
+        global_and_arm_feature_network.create_feed_forward_common_tower_network(
+            obs_spec, (4, 3), (3, 4), (4, 2)))
+    optimizer = tf.compat.v1.train.GradientDescentOptimizer(learning_rate=0.1)
+    agent = neural_epsilon_greedy_agent.NeuralEpsilonGreedyAgent(
+        time_step_spec,
+        self._action_spec,
+        reward_network=reward_net,
+        optimizer=optimizer,
+        epsilon=0.1,
+        accepts_per_arm_features=True)
+    observations = {
+        bandit_spec_utils.GLOBAL_FEATURE_KEY:
+            tf.constant([[1, 2], [3, 4]], dtype=tf.float32),
+        bandit_spec_utils.PER_ARM_FEATURE_KEY:
+            tf.cast(
+                tf.reshape(tf.range(18), shape=[2, 3, 3]), dtype=tf.float32)
+    }
+    time_steps = ts.restart(observations, batch_size=2)
+    policy = agent.policy
+    action_step = policy.action(time_steps)
+    self.evaluate(tf.compat.v1.initialize_all_variables())
+    actions = self.evaluate(action_step.action)
+    self.assertAllEqual(actions.shape, (2,))
 
 
 if __name__ == '__main__':

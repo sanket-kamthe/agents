@@ -21,7 +21,7 @@ from __future__ import print_function
 
 from absl.testing import parameterized
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.specs import array_spec
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
@@ -32,6 +32,7 @@ TYPE_PARAMETERS = (
     ("tf.float32", tf.float32),
     ("tf.float64", tf.float64),
     ("tf.uint8", tf.uint8),
+    ("tf.string", tf.string),
 )
 
 
@@ -128,6 +129,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
     self.assertTrue(np.all(sample_ == dtype.max - 1))
 
   def testSampleWithArrayInBounds(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     spec = tensor_spec.BoundedTensorSpec((2, 3), dtype, (0, 0, 0), 3)
     sample = tensor_spec.sample_spec_nest(spec)
     self.assertEqual((2, 3), sample.shape)
@@ -137,6 +140,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
     self.assertTrue(np.all(0 <= sample_))
 
   def testTensorSpecSample(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     spec = tensor_spec.TensorSpec((2, 3), dtype)
     sample = tensor_spec.sample_spec_nest(spec)
     bounded = tensor_spec.BoundedTensorSpec.from_spec(spec)
@@ -148,6 +153,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
         np.all(sample_ <= bounded.maximum), (sample_.min(), sample_.max()))
 
   def testBoundedTensorSpecSample(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     spec = tensor_spec.BoundedTensorSpec((2, 3), dtype, 2, 7)
     sample = tensor_spec.sample_spec_nest(spec)
     sample_ = self.evaluate(sample)
@@ -155,6 +162,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
     self.assertTrue(np.all(sample_ <= 7))
 
   def testOuterDimsNestAddsDimensionsToSpecs(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     nested_spec = example_nested_tensor_spec(dtype)
     outer_dims = (4, 3)
     self.assertEqual(
@@ -162,10 +171,29 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
         example_nested_tensor_spec(dtype, outer_dims))
 
   def testAddOuterShapeWhenNotTupleOrListThrows(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     with self.assertRaises(ValueError):
       tensor_spec.add_outer_dims_nest(1, example_nested_tensor_spec(dtype))
 
+  def testOuterDimsNestRemovesDimensionsFromSpecs(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
+    nested_spec = example_nested_tensor_spec(dtype)
+    larger_spec = tensor_spec.add_outer_dims_nest(nested_spec, (3, 4))
+    removed_spec = tensor_spec.remove_outer_dims_nest(larger_spec, 2)
+    self.assertEqual(nested_spec, removed_spec)
+
+  def testOuterDimsNestRemovesDimensionsFromSpecsThrows(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
+    nested_spec = example_nested_tensor_spec(dtype)
+    with self.assertRaises(ValueError):
+      tensor_spec.remove_outer_dims_nest(nested_spec, 10)
+
   def testNestSample(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     nested_spec = example_nested_tensor_spec(dtype)
     sample = tensor_spec.sample_spec_nest(nested_spec)
     spec_1 = tensor_spec.BoundedTensorSpec.from_spec(nested_spec["spec_1"])
@@ -205,6 +233,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
   def testNestSampleOuterDims(self, dtype):
     # Can't add another level of parameterized args because the test class is
     # already parameterized on dtype.
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     self._testNestSampleOuterDims(dtype, use_tensor=False)
     self._testNestSampleOuterDims(dtype, use_tensor=True)
 
@@ -284,6 +314,8 @@ class BoundedTensorSpecSampleTest(tf.test.TestCase, parameterized.TestCase):
 class TensorSpecZeroTest(tf.test.TestCase, parameterized.TestCase):
 
   def testNestZero(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     nested_spec = example_nested_tensor_spec(dtype)
     zeros = tensor_spec.zero_spec_nest(nested_spec)
     zeros_ = self.evaluate(zeros)
@@ -295,6 +327,8 @@ class TensorSpecZeroTest(tf.test.TestCase, parameterized.TestCase):
     tf.nest.map_structure(check_shape_and_zero, nested_spec, zeros_)
 
   def testNestZeroWithOuterDims(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     nested_spec = example_nested_tensor_spec(dtype)
     zeros = tensor_spec.zero_spec_nest(nested_spec, outer_dims=[4])
     zeros_ = self.evaluate(zeros)
@@ -306,6 +340,8 @@ class TensorSpecZeroTest(tf.test.TestCase, parameterized.TestCase):
     tf.nest.map_structure(check_shape_and_zero, nested_spec, zeros_)
 
   def testNestZeroWithOuterDimsTensor(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     nested_spec = example_nested_tensor_spec(dtype)
     zeros = tensor_spec.zero_spec_nest(
         nested_spec, outer_dims=[tf.constant(8, dtype=tf.int32)])
@@ -342,6 +378,8 @@ class TensorSpecTypeTest(tf.test.TestCase, parameterized.TestCase):
     self.assertIs(tensor_spec.is_continuous(spec), dtype.is_floating)
 
   def testExclusive(self, dtype):
+    if dtype == tf.string:
+      self.skipTest("Not compatible with string type.")
     spec = tensor_spec.TensorSpec((2, 3), dtype=dtype)
     self.assertIs(
         tensor_spec.is_discrete(spec) ^ tensor_spec.is_continuous(spec), True)

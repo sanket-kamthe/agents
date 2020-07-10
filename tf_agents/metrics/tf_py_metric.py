@@ -22,7 +22,7 @@ from __future__ import print_function
 import contextlib
 import threading
 
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.metrics import tf_metric
 
 
@@ -50,7 +50,7 @@ class TFPyMetric(tf_metric.TFStepMetric):
       dtype: Data type of the metric.
     """
     name = name or py_metric.name
-    super(TFPyMetric, self).__init__(name=name)
+    super(TFPyMetric, self).__init__(name=name, prefix=py_metric.prefix)
     self._py_metric = py_metric
     self._dtype = dtype
     self._lock = threading.Lock()

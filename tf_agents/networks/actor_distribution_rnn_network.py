@@ -22,7 +22,7 @@ from __future__ import print_function
 
 import gin
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.networks import categorical_projection_network
 from tf_agents.networks import lstm_encoding_network
@@ -66,12 +66,14 @@ class ActorDistributionRnnNetwork(network.DistributionNetwork):
                conv_layer_params=None,
                input_fc_layer_params=(200, 100),
                input_dropout_layer_params=None,
-               lstm_size=(40,),
+               lstm_size=None,
                output_fc_layer_params=(200, 100),
                activation_fn=tf.keras.activations.relu,
                dtype=tf.float32,
                discrete_projection_net=_categorical_projection_net,
                continuous_projection_net=_normal_projection_net,
+               rnn_construction_fn=None,
+               rnn_construction_kwargs={},
                name='ActorDistributionRnnNetwork'):
     """Creates an instance of `ActorDistributionRnnNetwork`.
 
@@ -116,6 +118,17 @@ class ActorDistributionRnnNetwork(network.DistributionNetwork):
       continuous_projection_net: Callable that generates a continuous projection
         network to be called with some hidden state and the outer_rank of the
         state.
+      rnn_construction_fn: (Optional.) Alternate RNN construction function, e.g.
+        tf.keras.layers.LSTM, tf.keras.layers.CuDNNLSTM. It is invalid to
+        provide both rnn_construction_fn and lstm_size.
+      rnn_construction_kwargs: (Optional.) Dictionary or arguments to pass to
+        rnn_construction_fn.
+
+        The RNN will be constructed via:
+
+        ```
+        rnn_layer = rnn_construction_fn(**rnn_construction_kwargs)
+        ```
       name: A string representing name of the network.
 
     Raises:
@@ -133,6 +146,8 @@ class ActorDistributionRnnNetwork(network.DistributionNetwork):
         lstm_size=lstm_size,
         output_fc_layer_params=output_fc_layer_params,
         activation_fn=activation_fn,
+        rnn_construction_fn=rnn_construction_fn,
+        rnn_construction_kwargs=rnn_construction_kwargs,
         dtype=dtype,
         name=name)
 
@@ -160,10 +175,12 @@ class ActorDistributionRnnNetwork(network.DistributionNetwork):
   def output_tensor_spec(self):
     return self._output_tensor_spec
 
-  def call(self, observation, step_type, network_state=None):
+  def call(self, observation, step_type, network_state=(), training=False):
     state, network_state = self._lstm_encoder(
-        observation, step_type=step_type, network_state=network_state)
+        observation, step_type=step_type, network_state=network_state,
+        training=training)
     outer_rank = nest_utils.get_outer_rank(observation, self.input_tensor_spec)
     output_actions = tf.nest.map_structure(
-        lambda proj_net: proj_net(state, outer_rank), self._projection_networks)
+        lambda proj_net: proj_net(state, outer_rank, training=training)[0],
+        self._projection_networks)
     return output_actions, network_state

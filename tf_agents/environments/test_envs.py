@@ -18,29 +18,40 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+import gin
 import numpy as np
 
 from tf_agents import specs
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
 
+from tf_agents.typing import types
 
+
+# TODO(b/156832202) Replace with EpisodeCountingEnv
+@gin.configurable
 class CountingEnv(py_environment.PyEnvironment):
-  """Counds up in the observation as steps are taken."""
+  """Counts up in the observation as steps are taken.
 
-  def __init__(self, steps_per_episode=10):
+  Step observation values are of the form (10 ** episodes + self._current_step)
+  if steps_per_episode is greater than 10 then on reset the value of the
+  observation count may go down.
+  """
+
+  def __init__(self, steps_per_episode: types.Int = 10):
     self._steps_per_episode = steps_per_episode
 
     self._episodes = 0
     self._current_step = np.array(0, dtype=np.int32)
     super(CountingEnv, self).__init__()
 
-  def observation_spec(self):
+  def observation_spec(self) -> types.NestedArraySpec:
     return specs.BoundedArraySpec((), dtype=np.int32)
 
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     return specs.BoundedArraySpec((), dtype=np.int32, minimum=0, maximum=1)
 
   def _step(self, action):
@@ -54,11 +65,52 @@ class CountingEnv(py_environment.PyEnvironment):
 
   def _get_observation(self):
     if self._episodes:
-      return np.array(10**self._episodes + self._current_step, dtype=np.int32)
+      return np.array(10 * self._episodes + self._current_step, dtype=np.int32)
     return self._current_step
 
   def _reset(self):
     if self._current_time_step and self._current_time_step.is_last():
       self._episodes += 1
     self._current_step = np.array(0, dtype=np.int32)
+    return ts.restart(self._get_observation())
+
+
+@gin.configurable
+class EpisodeCountingEnv(py_environment.PyEnvironment):
+  """Counts up in the observation as steps are taken.
+
+  Step observation values are of the form (episodes, self._current_step)
+  """
+
+  def __init__(self, steps_per_episode=10):
+    self._steps_per_episode = steps_per_episode
+
+    self._episodes = 0
+    self._steps = 0
+    super(EpisodeCountingEnv, self).__init__()
+
+  def observation_spec(self):
+    return (specs.BoundedArraySpec((), dtype=np.int32),
+            specs.BoundedArraySpec((), dtype=np.int32))
+
+  def action_spec(self):
+    return specs.BoundedArraySpec((), dtype=np.int32, minimum=0, maximum=1)
+
+  def _step(self, action):
+    del action  # Unused.
+    if self._current_time_step.is_last():
+      return self._reset()
+    self._steps += 1
+    if self._steps < self._steps_per_episode:
+      return ts.transition(self._get_observation(), 0)
+    return ts.termination(self._get_observation(), 1)
+
+  def _get_observation(self):
+    return (np.array(self._episodes, dtype=np.int32),
+            np.array(self._steps, dtype=np.int32))
+
+  def _reset(self):
+    if self._current_time_step and self._current_time_step.is_last():
+      self._episodes += 1
+      self._steps = 0
     return ts.restart(self._get_observation())

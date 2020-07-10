@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.bandits.environments import bandit_py_environment
 from tf_agents.bandits.environments import bandit_tf_environment
@@ -66,18 +66,20 @@ class DynamicEpisodeDriver(driver.Driver):
 
     Args:
       env: A tf_environment.Base environment.
-      policy: A tf_policy.Base policy.
+      policy: A tf_policy.TFPolicy policy.
       observers: A list of observers that are updated after every step in the
         environment. Each observer is a callable(Trajectory).
       transition_observers: A list of observers that are updated after every
         step in the environment. Each observer is a callable((TimeStep,
         PolicyStep, NextTimeStep)).
-      num_episodes: The number of episodes to take in the environment.
+      num_episodes: The number of episodes to take in the environment. For
+        batched or parallel environments, this is the total number of episodes
+        summed across all environments.
 
     Raises:
       ValueError:
         If env is not a tf_environment.Base or policy is not an instance of
-        tf_policy.Base.
+        tf_policy.TFPolicy.
     """
     super(DynamicEpisodeDriver, self).__init__(env, policy, observers,
                                                transition_observers)
@@ -211,12 +213,14 @@ class DynamicEpisodeDriver(driver.Driver):
     counter = tf.zeros(batch_dims, tf.int32)
 
     num_episodes = num_episodes or self._num_episodes
-    [_, time_step, policy_state] = tf.while_loop(
-        cond=self._loop_condition_fn(num_episodes),
-        body=self._loop_body_fn(),
-        loop_vars=[counter, time_step, policy_state],
-        back_prop=False,
-        parallel_iterations=1,
-        maximum_iterations=maximum_iterations,
-        name='driver_loop')
+    [_, time_step, policy_state] = tf.nest.map_structure(
+        tf.stop_gradient,
+        tf.while_loop(
+            cond=self._loop_condition_fn(num_episodes),
+            body=self._loop_body_fn(),
+            loop_vars=[counter, time_step, policy_state],
+            parallel_iterations=1,
+            maximum_iterations=maximum_iterations,
+            name='driver_loop'))
+
     return time_step, policy_state

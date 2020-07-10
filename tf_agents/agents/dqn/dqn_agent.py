@@ -24,23 +24,27 @@ Implements the DQN algorithm from
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import collections
+from typing import Optional, Text
 
 import gin
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.agents import tf_agent
+from tf_agents.networks import network
+from tf_agents.networks import utils as network_utils
 from tf_agents.policies import boltzmann_policy
 from tf_agents.policies import epsilon_greedy_policy
 from tf_agents.policies import greedy_policy
 from tf_agents.policies import q_policy
+from tf_agents.trajectories import time_step as ts
 from tf_agents.trajectories import trajectory
+from tf_agents.typing import types
 from tf_agents.utils import common
-from tf_agents.utils import composite
 from tf_agents.utils import eager_utils
 from tf_agents.utils import nest_utils
-from tf_agents.utils import training
 from tf_agents.utils import value_ops
 
 
@@ -67,7 +71,9 @@ class DqnLossInfo(collections.namedtuple('DqnLossInfo',
   pass
 
 
-def compute_td_targets(next_q_values, rewards, discounts):
+def compute_td_targets(next_q_values: types.Tensor,
+                       rewards: types.Tensor,
+                       discounts: types.Tensor) -> types.Tensor:
   return tf.stop_gradient(rewards + discounts * next_q_values)
 
 
@@ -88,29 +94,30 @@ class DqnAgent(tf_agent.TFAgent):
 
   def __init__(
       self,
-      time_step_spec,
-      action_spec,
-      q_network,
-      optimizer,
-      observation_and_action_constraint_splitter=None,
-      epsilon_greedy=0.1,
-      n_step_update=1,
-      boltzmann_temperature=None,
-      emit_log_probability=False,
+      time_step_spec: ts.TimeStep,
+      action_spec: types.NestedTensorSpec,
+      q_network: network.Network,
+      optimizer: types.Optimizer,
+      observation_and_action_constraint_splitter: Optional[
+          types.Splitter] = None,
+      epsilon_greedy: types.Float = 0.1,
+      n_step_update: int = 1,
+      boltzmann_temperature: Optional[types.Int] = None,
+      emit_log_probability: bool = False,
       # Params for target network updates
-      target_q_network=None,
-      target_update_tau=1.0,
-      target_update_period=1,
+      target_q_network: Optional[network.Network] = None,
+      target_update_tau: types.Float = 1.0,
+      target_update_period: int = 1,
       # Params for training.
-      td_errors_loss_fn=None,
-      gamma=1.0,
-      reward_scale_factor=1.0,
-      gradient_clipping=None,
+      td_errors_loss_fn: Optional[types.LossFn] = None,
+      gamma: types.Float = 1.0,
+      reward_scale_factor: types.Float = 1.0,
+      gradient_clipping: Optional[types.Float] = None,
       # Params for debugging
-      debug_summaries=False,
-      summarize_grads_and_vars=False,
-      train_step_counter=None,
-      name=None):
+      debug_summaries: bool = False,
+      summarize_grads_and_vars: bool = False,
+      train_step_counter: Optional[tf.Variable] = None,
+      name: Optional[Text] = None):
     """Creates a DQN Agent.
 
     Args:
@@ -198,8 +205,10 @@ class DqnAgent(tf_agent.TFAgent):
         under that name. Defaults to the class name.
 
     Raises:
-      ValueError: If the action spec contains more than one action or action
+      ValueError: If `action_spec` contains more than one action or action
         spec minimum is not equal to 0.
+      ValueError: If the q networks do not emit floating point outputs with
+        inner shape matching `action_spec`.
       NotImplementedError: If `q_network` has non-empty `state_spec` (i.e., an
         RNN is provided) and `n_step_update > 1`.
     """
@@ -221,6 +230,9 @@ class DqnAgent(tf_agent.TFAgent):
       target_q_network.create_variables()
     self._target_q_network = common.maybe_copy_target_network_with_checks(
         self._q_network, target_q_network, 'TargetQNetwork')
+
+    self._check_network_output(self._q_network, 'q_network')
+    self._check_network_output(self._target_q_network, 'target_q_network')
 
     self._epsilon_greedy = epsilon_greedy
     self._n_step_update = n_step_update
@@ -258,18 +270,37 @@ class DqnAgent(tf_agent.TFAgent):
 
   def _check_action_spec(self, action_spec):
     flat_action_spec = tf.nest.flatten(action_spec)
-    self._num_actions = [
-        spec.maximum - spec.minimum + 1 for spec in flat_action_spec
-    ]
 
     # TODO(oars): Get DQN working with more than one dim in the actions.
-    if len(flat_action_spec) > 1 or flat_action_spec[0].shape.rank > 1:
-      raise ValueError('Only one dimensional actions are supported now.')
-
-    if not all(spec.minimum == 0 for spec in flat_action_spec):
+    if len(flat_action_spec) > 1 or flat_action_spec[0].shape.rank > 0:
       raise ValueError(
-          'Action specs should have minimum of 0, but saw: {0}'.format(
-              [spec.minimum for spec in flat_action_spec]))
+          'Only scalar actions are supported now, but action spec is: {}'
+          .format(action_spec))
+
+    spec = flat_action_spec[0]
+
+    # TODO(b/119321125): Disable this once index_with_actions supports
+    # negative-valued actions.
+    if spec.minimum != 0:
+      raise ValueError(
+          'Action specs should have minimum of 0, but saw: {0}'.format(spec))
+
+    self._num_actions = spec.maximum - spec.minimum + 1
+
+  def _check_network_output(self, net, label):
+    """Check outputs of q_net and target_q_net against expected shape.
+
+    Subclasses that require different q_network outputs should override
+    this function.
+
+    Args:
+      net: A `Network`.
+      label: A label to print in case of a mismatch.
+    """
+    network_utils.check_single_floating_network_output(
+        net.create_variables(),
+        expected_output_shape=(self._num_actions,),
+        label=label)
 
   def _setup_policy(self, time_step_spec, action_spec,
                     boltzmann_temperature, emit_log_probability):
@@ -330,18 +361,6 @@ class DqnAgent(tf_agent.TFAgent):
 
       return common.Periodically(update, period, 'periodic_update_targets')
 
-  def _experience_to_transitions(self, experience):
-    transitions = trajectory.to_transition(experience)
-
-    # Remove time dim if we are not using a recurrent network.
-    if not self._q_network.state_spec:
-      transitions = tf.nest.map_structure(lambda x: composite.squeeze(x, 1),
-                                          transitions)
-
-    time_steps, policy_steps, next_time_steps = transitions
-    actions = policy_steps.action
-    return time_steps, actions, next_time_steps
-
   # Use @common.function in graph mode or for speeding up.
   def _train(self, experience, weights):
     with tf.GradientTape() as tape:
@@ -350,8 +369,9 @@ class DqnAgent(tf_agent.TFAgent):
           td_errors_loss_fn=self._td_errors_loss_fn,
           gamma=self._gamma,
           reward_scale_factor=self._reward_scale_factor,
-          weights=weights)
-    tf.debugging.check_numerics(loss_info[0], 'Loss is inf or nan')
+          weights=weights,
+          training=True)
+    tf.debugging.check_numerics(loss_info.loss, 'Loss is inf or nan')
     variables_to_train = self._q_network.trainable_weights
     non_trainable_weights = self._q_network.non_trainable_weights
     assert list(variables_to_train), "No variables in the agent's q_network."
@@ -369,8 +389,8 @@ class DqnAgent(tf_agent.TFAgent):
                                           self.train_step_counter)
       eager_utils.add_gradients_summaries(grads_and_vars,
                                           self.train_step_counter)
-    training.apply_gradients(
-        self._optimizer, grads_and_vars, global_step=self.train_step_counter)
+    self._optimizer.apply_gradients(grads_and_vars)
+    self.train_step_counter.assign_add(1)
 
     self._update_target()
 
@@ -381,7 +401,8 @@ class DqnAgent(tf_agent.TFAgent):
             td_errors_loss_fn=common.element_wise_huber_loss,
             gamma=1.0,
             reward_scale_factor=1.0,
-            weights=None):
+            weights=None,
+            training=False):
     """Computes loss for DQN training.
 
     Args:
@@ -397,6 +418,7 @@ class DqnAgent(tf_agent.TFAgent):
       weights: Optional scalar or elementwise (per-batch-entry) importance
         weights.  The output td_loss will be scaled by these weights, and
         the final scalar loss is the mean of these values.
+      training: Whether this loss is being used for training.
 
     Returns:
       loss: An instance of `DqnLossInfo`.
@@ -408,22 +430,30 @@ class DqnAgent(tf_agent.TFAgent):
     # method requires a time dimension to compute the loss properly.
     self._check_trajectory_dimensions(experience)
 
+    squeeze_time_dim = not self._q_network.state_spec
     if self._n_step_update == 1:
-      time_steps, actions, next_time_steps = self._experience_to_transitions(
-          experience)
+      time_steps, policy_steps, next_time_steps = (
+          trajectory.experience_to_transitions(experience, squeeze_time_dim))
+      actions = policy_steps.action
     else:
       # To compute n-step returns, we need the first time steps, the first
       # actions, and the last time steps. Therefore we extract the first and
       # last transitions from our Trajectory.
       first_two_steps = tf.nest.map_structure(lambda x: x[:, :2], experience)
       last_two_steps = tf.nest.map_structure(lambda x: x[:, -2:], experience)
-      time_steps, actions, _ = self._experience_to_transitions(first_two_steps)
-      _, _, next_time_steps = self._experience_to_transitions(last_two_steps)
+      time_steps, policy_steps, _ = (
+          trajectory.experience_to_transitions(
+              first_two_steps, squeeze_time_dim))
+      actions = policy_steps.action
+      _, _, next_time_steps = (
+          trajectory.experience_to_transitions(
+              last_two_steps, squeeze_time_dim))
 
     with tf.name_scope('loss'):
-      q_values = self._compute_q_values(time_steps, actions)
+      q_values = self._compute_q_values(time_steps, actions, training=training)
 
-      next_q_values = self._compute_next_q_values(next_time_steps)
+      next_q_values = self._compute_next_q_values(
+          next_time_steps, policy_steps.info)
 
       if self._n_step_update == 1:
         # Special case for n = 1 to avoid a loss of performance.
@@ -458,25 +488,27 @@ class DqnAgent(tf_agent.TFAgent):
         # Do a sum over the time dimension.
         td_loss = tf.reduce_sum(input_tensor=td_loss, axis=1)
 
-      if weights is not None:
-        td_loss *= weights
-
-      # Average across the elements of the batch.
+      # Aggregate across the elements of the batch and add regularization loss.
       # Note: We use an element wise loss above to ensure each element is always
       #   weighted by 1/N where N is the batch size, even when some of the
       #   weights are zero due to boundary transitions. Weighting by 1/K where K
       #   is the actual number of non-zero weight would artificially increase
       #   their contribution in the loss. Think about what would happen as
       #   the number of boundary samples increases.
-      loss = tf.reduce_mean(input_tensor=td_loss)
 
-      # Add network loss (such as regularization loss)
-      if self._q_network.losses:
-        loss = loss + tf.reduce_mean(self._q_network.losses)
+      agg_loss = common.aggregate_losses(
+          per_example_loss=td_loss,
+          sample_weight=weights,
+          regularization_loss=self._q_network.losses)
+      total_loss = agg_loss.total_loss
 
-      with tf.name_scope('Losses/'):
-        tf.compat.v2.summary.scalar(
-            name='loss', data=loss, step=self.train_step_counter)
+      losses_dict = {'td_loss': agg_loss.weighted,
+                     'reg_loss': agg_loss.regularization,
+                     'total_loss': total_loss}
+
+      common.summarize_scalar_dict(losses_dict,
+                                   step=self.train_step_counter,
+                                   name_scope='Losses/')
 
       if self._summarize_grads_and_vars:
         with tf.name_scope('Variables/'):
@@ -499,17 +531,18 @@ class DqnAgent(tf_agent.TFAgent):
         common.generate_tensor_summaries('diff_q_values', diff_q_values,
                                          self.train_step_counter)
 
-      return tf_agent.LossInfo(loss, DqnLossInfo(td_loss=td_loss,
-                                                 td_error=td_error))
+      return tf_agent.LossInfo(total_loss, DqnLossInfo(td_loss=td_loss,
+                                                       td_error=td_error))
 
-  def _compute_q_values(self, time_steps, actions):
+  def _compute_q_values(self, time_steps, actions, training=False):
     network_observation = time_steps.observation
 
     if self._observation_and_action_constraint_splitter is not None:
       network_observation, _ = self._observation_and_action_constraint_splitter(
           network_observation)
 
-    q_values, _ = self._q_network(network_observation, time_steps.step_type)
+    q_values, _ = self._q_network(network_observation, time_steps.step_type,
+                                  training=training)
     # Handle action_spec.shape=(), and shape=(1,) by using the multi_dim_actions
     # param. Note: assumes len(tf.nest.flatten(action_spec)) == 1.
     multi_dim_actions = self._action_spec.shape.rank > 0
@@ -518,11 +551,13 @@ class DqnAgent(tf_agent.TFAgent):
         tf.cast(actions, dtype=tf.int32),
         multi_dim_actions=multi_dim_actions)
 
-  def _compute_next_q_values(self, next_time_steps):
+  def _compute_next_q_values(self, next_time_steps, info):
     """Compute the q value of the next state for TD error computation.
 
     Args:
       next_time_steps: A batch of next timesteps
+      info: PolicyStep.info that may be used by other agents inherited from
+        dqn_agent.
 
     Returns:
       A tensor of Q values for the given next state.
@@ -564,15 +599,18 @@ class DdqnAgent(DqnAgent):
 
   """
 
-  def _compute_next_q_values(self, next_time_steps):
+  def _compute_next_q_values(self, next_time_steps, info):
     """Compute the q value of the next state for TD error computation.
 
     Args:
       next_time_steps: A batch of next timesteps
+      info: PolicyStep.info that may be used by other agents inherited from
+        dqn_agent.
 
     Returns:
       A tensor of Q values for the given next state.
     """
+    del info
     # TODO(b/117175589): Add binary tests for DDQN.
     network_observation = next_time_steps.observation
 

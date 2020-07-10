@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 """Benchmarks for DqnAgent."""
 
 from __future__ import absolute_import
@@ -22,7 +23,8 @@ from __future__ import print_function
 import unittest
 
 import numpy as np
-import tensorflow as tf
+from six.moves import range
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.agents.dqn import dqn_agent
 from tf_agents.benchmark import distribution_strategy_utils
 from tf_agents.benchmark import utils
@@ -101,7 +103,7 @@ class DqnCartPoleAgentBenchmark(tf.test.Benchmark):
     for _ in range(replay_buffer_max_length):
       driver.run()
 
-    check_values = ['QNetwork/EncodingNetwork/EncodingNetwork/dense/bias:0']
+    check_values = ['QNetwork/EncodingNetwork/dense/bias:0']
     initial_values = utils.get_initial_values(tf_agent, check_values)
 
     with distribution_strategy_utils.strategy_scope_context(strategy):

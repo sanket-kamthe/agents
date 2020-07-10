@@ -21,40 +21,45 @@ environment in common ways.
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
 import abc
 import collections
 import cProfile
+from typing import Any, Callable, Optional, Sequence, Text, Union
+
 import gin
 import numpy as np
 import six
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
+
 from tensorflow.python.util import nest  # pylint:disable=g-direct-tensorflow-import  # TF internal
 
 
 class PyEnvironmentBaseWrapper(py_environment.PyEnvironment):
   """PyEnvironment wrapper forwards calls to the given environment."""
 
-  def __init__(self, env):
+  def __init__(self, env: Any):
     super(PyEnvironmentBaseWrapper, self).__init__()
     self._env = env
 
-  def __getattr__(self, name):
+  def __getattr__(self, name: Text):
     """Forward all other calls to the base environment."""
     return getattr(self._env, name)
 
   @property
-  def batched(self):
+  def batched(self) -> bool:
     return getattr(self._env, 'batched', False)
 
   @property
-  def batch_size(self):
+  def batch_size(self) -> Optional[types.Int]:
     return getattr(self._env, 'batch_size', None)
 
   def _reset(self):
@@ -63,33 +68,39 @@ class PyEnvironmentBaseWrapper(py_environment.PyEnvironment):
   def _step(self, action):
     return self._env.step(action)
 
-  def get_info(self):
+  def get_info(self) -> Any:
     return self._env.get_info()
 
-  def observation_spec(self):
+  def observation_spec(self) -> types.NestedArray:
     return self._env.observation_spec()
 
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArray:
     return self._env.action_spec()
 
-  def close(self):
+  def close(self) -> None:
     return self._env.close()
 
-  def render(self, mode='rgb_array'):
+  def render(self, mode: Text = 'rgb_array') -> types.NestedArray:
     return self._env.render(mode)
 
-  def seed(self, seed):
+  def seed(self, seed: types.Seed) -> types.Seed:
     return self._env.seed(seed)
 
-  def wrapped_env(self):
+  def wrapped_env(self) -> Any:
     return self._env
+
+  def set_state(self, state: Any) -> None:
+    self._env.set_state(state)
+
+  def get_state(self) -> Any:
+    return self._env.get_state()
 
 
 @gin.configurable
 class TimeLimit(PyEnvironmentBaseWrapper):
   """End episodes after specified number of steps."""
 
-  def __init__(self, env, duration):
+  def __init__(self, env: py_environment.PyEnvironment, duration: types.Int):
     super(TimeLimit, self).__init__(env)
     self._duration = duration
     self._num_steps = None
@@ -114,7 +125,7 @@ class TimeLimit(PyEnvironmentBaseWrapper):
     return time_step
 
   @property
-  def duration(self):
+  def duration(self) -> types.Int:
     return self._duration
 
 
@@ -122,7 +133,9 @@ class TimeLimit(PyEnvironmentBaseWrapper):
 class PerformanceProfiler(PyEnvironmentBaseWrapper):
   """End episodes after specified number of steps."""
 
-  def __init__(self, env, process_profile_fn, process_steps):
+  def __init__(self, env: py_environment.PyEnvironment,
+               process_profile_fn: Callable[[cProfile.Profile], Any],
+               process_steps: int):
     """Create a PerformanceProfiler that uses cProfile to profile env execution.
 
     Args:
@@ -171,16 +184,12 @@ class PerformanceProfiler(PyEnvironmentBaseWrapper):
 
     return time_step
 
-  @property
-  def duration(self):
-    return self._duration
-
 
 @gin.configurable
 class ActionRepeat(PyEnvironmentBaseWrapper):
   """Repeates actions over n-steps while acummulating the received reward."""
 
-  def __init__(self, env, times):
+  def __init__(self, env: py_environment.PyEnvironment, times: types.Int):
     """Creates an action repeat wrapper.
 
     Args:
@@ -212,6 +221,58 @@ class ActionRepeat(PyEnvironmentBaseWrapper):
 
 
 @gin.configurable
+class ObservationFilterWrapper(PyEnvironmentBaseWrapper):
+  """Filters observations based on an array of indexes.
+
+  Note that this wrapper only supports single-dimensional observations.
+  """
+
+  def __init__(self,
+               env: py_environment.PyEnvironment,
+               idx: Union[Sequence[int], np.ndarray]):
+    """Creates an observation filter wrapper.
+
+    Args:
+      env: Environment to wrap.
+      idx: Array of indexes pointing to elements to include in output.
+
+    Raises:
+      ValueError: If observation spec is nested.
+      ValueError: If indexes are not single-dimensional.
+      ValueError: If no index is provided.
+      ValueError: If one of the indexes is out of bounds.
+    """
+    super(ObservationFilterWrapper, self).__init__(env)
+    idx = np.array(idx)
+    if tf.nest.is_nested(env.observation_spec()):
+      raise ValueError('ObservationFilterWrapper only works with single-array '
+                       'observations (not nested).')
+    if len(idx.shape) != 1:
+      raise ValueError('ObservationFilterWrapper only works with '
+                       'single-dimensional indexes for filtering.')
+    if idx.shape[0] < 1:
+      raise ValueError('At least one index needs to be provided for filtering.')
+    if not np.all(idx < env.observation_spec().shape[0]):
+      raise ValueError('One of the indexes is out of bounds.')
+
+    self._idx = idx
+    self._observation_spec = env.observation_spec().replace(shape=idx.shape)
+
+  def _step(self, action):
+    time_step = self._env.step(action)
+    return time_step._replace(observation=
+                              np.array(time_step.observation)[self._idx])
+
+  def observation_spec(self) -> types.NestedArraySpec:
+    return self._observation_spec
+
+  def _reset(self):
+    time_step = self._env.reset()
+    return time_step._replace(observation=
+                              np.array(time_step.observation)[self._idx])
+
+
+@gin.configurable
 class RunStats(PyEnvironmentBaseWrapper):
   """Wrapper that accumulates run statistics as the environment iterates.
 
@@ -223,7 +284,7 @@ class RunStats(PyEnvironmentBaseWrapper):
    * resets   == number of FIRST timesteps,
   """
 
-  def __init__(self, env):
+  def __init__(self, env: py_environment.PyEnvironment):
     super(RunStats, self).__init__(env)
     self._episodes = 0
     self._resets = 0
@@ -231,19 +292,19 @@ class RunStats(PyEnvironmentBaseWrapper):
     self._total_steps = 0
 
   @property
-  def episodes(self):
+  def episodes(self) -> int:
     return self._episodes
 
   @property
-  def episode_steps(self):
+  def episode_steps(self) -> int:
     return self._episode_steps
 
   @property
-  def total_steps(self):
+  def total_steps(self) -> int:
     return self._total_steps
 
   @property
-  def resets(self):
+  def resets(self) -> int:
     return self._resets
 
   def _reset(self):
@@ -271,7 +332,9 @@ class RunStats(PyEnvironmentBaseWrapper):
 class ActionDiscretizeWrapper(PyEnvironmentBaseWrapper):
   """Wraps an environment with continuous actions and discretizes them."""
 
-  def __init__(self, env, num_actions):
+  def __init__(self,
+               env: py_environment.PyEnvironment,
+               num_actions: np.ndarray):
     """Constructs a wrapper for discretizing the action space.
 
     **Note:** Only environments with a single BoundedArraySpec are supported.
@@ -294,6 +357,7 @@ class ActionDiscretizeWrapper(PyEnvironmentBaseWrapper):
           'action spec. Got {}'.format(env.action_spec()))
 
     action_spec = action_spec[0]
+    self._original_spec = action_spec
     self._num_actions = np.broadcast_to(num_actions, action_spec.shape)
 
     if action_spec.shape != self._num_actions.shape:
@@ -319,15 +383,21 @@ class ActionDiscretizeWrapper(PyEnvironmentBaseWrapper):
       raise ValueError('num_actions should all be at least size 2.')
 
     limits = np.asarray(limits)
+    # Simplify shape of bounds if they are all equal.
+    if np.all(limits == limits.flat[0]):
+      limits = limits.flat[0]
+    # Workaround for b/148086610. Makes the discretized wrapper generate a
+    # scalar spec when possible.
+    shape = () if spec.shape == (1,) else spec.shape
     discrete_spec = array_spec.BoundedArraySpec(
-        shape=spec.shape,
+        shape=shape,
         dtype=np.int32,
         minimum=0,
         maximum=limits - 1,
         name=spec.name)
 
-    minimum = np.broadcast_to(spec.minimum, spec.shape)
-    maximum = np.broadcast_to(spec.maximum, spec.shape)
+    minimum = np.broadcast_to(spec.minimum, shape)
+    maximum = np.broadcast_to(spec.maximum, shape)
 
     action_map = [
         np.linspace(spec_min, spec_max, num=n_actions)
@@ -337,7 +407,7 @@ class ActionDiscretizeWrapper(PyEnvironmentBaseWrapper):
 
     return discrete_spec, action_map
 
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     return self._discrete_spec
 
   def _map_actions(self, action, action_map):
@@ -360,7 +430,7 @@ class ActionDiscretizeWrapper(PyEnvironmentBaseWrapper):
               action.shape, self._discrete_spec.shape))
 
     mapped_action = [action_map[i][a] for i, a in enumerate(action.flatten())]
-    return np.reshape(mapped_action, newshape=action.shape)
+    return np.reshape(mapped_action, newshape=self._original_spec.shape)
 
   def _step(self, action):
     """Steps the environment while remapping the actions.
@@ -416,7 +486,7 @@ class ActionOffsetWrapper(PyEnvironmentBaseWrapper):
   negative-valued actions.
   """
 
-  def __init__(self, env):
+  def __init__(self, env: py_environment.PyEnvironment):
     super(ActionOffsetWrapper, self).__init__(env)
     if tf.nest.is_nested(self._env.action_spec()):
       raise ValueError('ActionOffsetWrapper only works with single-array '
@@ -428,7 +498,7 @@ class ActionOffsetWrapper(PyEnvironmentBaseWrapper):
       raise ValueError('ActionOffsetWrapper only works with discrete '
                        'action specs.')
 
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     spec = self._env.action_spec()
     minimum = np.zeros(shape=spec.shape, dtype=spec.dtype)
     maximum = spec.maximum - spec.minimum
@@ -467,7 +537,9 @@ class FlattenObservationsWrapper(PyEnvironmentBaseWrapper):
   structure of each observation (such as if min or max bounds are set) are lost.
   """
 
-  def __init__(self, env, observations_whitelist=None):
+  def __init__(self,
+               env: py_environment.PyEnvironment,
+               observations_whitelist: Optional[Sequence[Text]] = None):
     """Initializes a wrapper to flatten environment observations.
 
     Args:
@@ -524,7 +596,7 @@ class FlattenObservationsWrapper(PyEnvironmentBaseWrapper):
     # Compute the observation length after flattening the observation items and
     # nested structure. Observation specs are not batched.
     observation_total_len = sum(
-        np.prod(observation.shape)
+        int(np.prod(observation.shape))
         for observation in self._flatten_nested_observations(
             observations_spec, is_batched=False))
 
@@ -635,7 +707,7 @@ class FlattenObservationsWrapper(PyEnvironmentBaseWrapper):
     """
     return self._pack_and_filter_timestep_observation(self._env.reset())
 
-  def observation_spec(self):
+  def observation_spec(self) -> types.NestedArraySpec:
     """Defines the observations provided by the environment.
 
     Returns:
@@ -655,7 +727,7 @@ class GoalReplayEnvWrapper(PyEnvironmentBaseWrapper):
   class.
   """
 
-  def __init__(self, env):
+  def __init__(self, env: py_environment.PyEnvironment):
     """Initializes a wrapper to add a goal to the observation.
 
     Args:
@@ -669,7 +741,9 @@ class GoalReplayEnvWrapper(PyEnvironmentBaseWrapper):
     self._goal = None
 
   @abc.abstractmethod
-  def get_trajectory_with_goal(self, trajectory, goal):
+  def get_trajectory_with_goal(self,
+                               trajectory: ts.TimeStep,
+                               goal: types.NestedArray) -> ts.TimeStep:
     """Generates a new trajectory assuming the given goal was the actual target.
 
     One example is updating a "distance-to-goal" field in the observation. Note
@@ -677,11 +751,11 @@ class GoalReplayEnvWrapper(PyEnvironmentBaseWrapper):
     given trajectory.
 
     Args:
-      trajectory: An instance of `Trajectory`.
+      trajectory: An instance of `TimeStep`.
       goal: Environment specific goal
 
     Returns:
-      Updated instance of `Trajectory`
+      Updated instance of `TimeStep`
 
     Raises:
       NotImplementedError: function should be implemented in child class.
@@ -689,11 +763,12 @@ class GoalReplayEnvWrapper(PyEnvironmentBaseWrapper):
     pass
 
   @abc.abstractmethod
-  def get_goal_from_trajectory(self, trajectory):
+  def get_goal_from_trajectory(self,
+                               trajectory: ts.TimeStep) -> types.NestedArray:
     """Extracts the goal from a given trajectory.
 
     Args:
-      trajectory: An instance of `Trajectory`.
+      trajectory: An instance of `TimeStep`.
 
     Returns:
       Environment specific goal
@@ -719,7 +794,10 @@ class GoalReplayEnvWrapper(PyEnvironmentBaseWrapper):
 class HistoryWrapper(PyEnvironmentBaseWrapper):
   """Adds observation and action history to the environment's observations."""
 
-  def __init__(self, env, history_length=3, include_actions=False):
+  def __init__(self,
+               env: py_environment.PyEnvironment,
+               history_length: int = 3,
+               include_actions: bool = False):
     """Initializes a HistoryWrapper.
 
     Args:
@@ -742,8 +820,7 @@ class HistoryWrapper(PyEnvironmentBaseWrapper):
   def _get_observation_spec(self):
 
     def _update_shape(spec):
-      return array_spec.update_spec_shape(spec,
-                                          (self._history_length,) + spec.shape)
+      return spec.replace(shape=(self._history_length,) + spec.shape)
 
     observation_spec = tf.nest.map_structure(_update_shape,
                                              self._env.observation_spec())
@@ -755,7 +832,7 @@ class HistoryWrapper(PyEnvironmentBaseWrapper):
     else:
       return observation_spec
 
-  def observation_spec(self):
+  def observation_spec(self) -> types.NestedArraySpec:
     return self._observation_spec
 
   def _zeros_from_spec(self, spec):
@@ -799,7 +876,7 @@ class HistoryWrapper(PyEnvironmentBaseWrapper):
 class OneHotActionWrapper(PyEnvironmentBaseWrapper):
   """Converts discrete action to one_hot format."""
 
-  def __init__(self, env):
+  def __init__(self, env: py_environment.PyEnvironment):
     super(OneHotActionWrapper, self).__init__(env)
 
     def convert_to_one_hot(spec):
@@ -824,7 +901,7 @@ class OneHotActionWrapper(PyEnvironmentBaseWrapper):
     self._one_hot_action_spec = tf.nest.map_structure(
         convert_to_one_hot, self._env.action_spec())
 
-  def action_spec(self):
+  def action_spec(self) -> types.NestedArraySpec:
     return self._one_hot_action_spec
 
   def _step(self, action):

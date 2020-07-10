@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 """Keras Encoding Network.
 
 Implements a network that will generate the following layers:
@@ -30,7 +31,8 @@ from __future__ import print_function
 
 from absl import logging
 import gin
-import tensorflow as tf
+from six.moves import zip
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.networks import network
 from tf_agents.networks import utils
@@ -65,7 +67,7 @@ def _copy_layer(layer):
     raise ValueError('DenseFeatures V1 is not supported. '
                      'Use tf.compat.v2.keras.layers.DenseFeatures instead.')
   if layer.built:
-    logging.warn(
+    logging.warning(
         'Beware: Copying a layer that has already been built: \'%s\'.  '
         'This can lead to subtle bugs because the original layer\'s weights '
         'will not be used in the copy.', layer.name)
@@ -198,8 +200,7 @@ class EncodingNetwork(network.Network):
       # to work.
       if not nest.is_sequence(input_tensor_spec):
         input_nest = [input_tensor_spec]
-      nest.assert_shallow_structure(
-          preprocessing_layers, input_nest, check_types=False)
+      nest.assert_shallow_structure(preprocessing_layers, input_nest)
 
     if (len(tf.nest.flatten(input_tensor_spec)) > 1 and
         preprocessing_combiner is None):
@@ -242,8 +243,7 @@ class EncodingNetwork(network.Network):
                 dilation_rate=dilation_rate,
                 activation=activation_fn,
                 kernel_initializer=kernel_initializer,
-                dtype=dtype,
-                name='%s/conv%s' % (name, conv_type)))
+                dtype=dtype))
 
     layers.append(tf.keras.layers.Flatten())
 
@@ -274,8 +274,7 @@ class EncodingNetwork(network.Network):
                 activation=activation_fn,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernal_regularizer,
-                dtype=dtype,
-                name='%s/dense' % name))
+                dtype=dtype))
         if not isinstance(dropout_params, dict):
           dropout_params = {'rate': dropout_params} if dropout_params else None
 
@@ -309,8 +308,7 @@ class EncodingNetwork(network.Network):
     else:
       processed = []
       for obs, layer in zip(
-          nest.flatten_up_to(
-              self._preprocessing_nest, observation, check_types=False),
+          nest.flatten_up_to(self._preprocessing_nest, observation),
           self._flat_preprocessing_layers):
         processed.append(layer(obs, training=training))
       if len(processed) == 1 and self._preprocessing_combiner is None:

@@ -21,7 +21,7 @@ from __future__ import print_function
 
 import gin
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.networks import categorical_projection_network
 from tf_agents.networks import encoding_network
@@ -160,13 +160,24 @@ class ActorDistributionNetwork(network.DistributionNetwork):
   def output_tensor_spec(self):
     return self._output_tensor_spec
 
-  def call(self, observations, step_type, network_state, training=False):
+  def call(self,
+           observations,
+           step_type,
+           network_state,
+           training=False,
+           mask=None):
     state, network_state = self._encoder(
         observations,
         step_type=step_type,
         network_state=network_state,
         training=training)
     outer_rank = nest_utils.get_outer_rank(observations, self.input_tensor_spec)
+
+    def call_projection_net(proj_net):
+      distribution, _ = proj_net(
+          state, outer_rank, training=training, mask=mask)
+      return distribution
+
     output_actions = tf.nest.map_structure(
-        lambda proj_net: proj_net(state, outer_rank), self._projection_networks)
+        call_projection_net, self._projection_networks)
     return output_actions, network_state

@@ -16,27 +16,33 @@
 """Policy implementation that generates random actions."""
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
+from typing import Optional, Sequence
+
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.distributions import masked
 from tf_agents.policies import py_policy
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import policy_step
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 from tf_agents.utils import nest_utils
 
 
-class RandomPyPolicy(py_policy.Base):
+class RandomPyPolicy(py_policy.PyPolicy):
   """Returns random samples of the given action_spec."""
 
   def __init__(self,
-               time_step_spec,
-               action_spec,
-               seed=None,
-               outer_dims=None,
-               observation_and_action_constraint_splitter=None):
+               time_step_spec: ts.TimeStep,
+               action_spec: types.NestedArraySpec,
+               info_spec: types.NestedArraySpec = (),
+               seed: Optional[types.Seed] = None,
+               outer_dims: Optional[Sequence[int]] = None,
+               observation_and_action_constraint_splitter: Optional[
+                   types.Splitter] = None):
     """Initializes the RandomPyPolicy.
 
     Args:
@@ -45,6 +51,8 @@ class RandomPyPolicy(py_policy.Base):
         given time_step when action is called.
       action_spec: A nest of BoundedArraySpec representing the actions to sample
         from.
+      info_spec: Nest of `tf.TypeSpec` representing the data in the policy
+        info field.
       seed: Optional seed used to instantiate a random number generator.
       outer_dims: An optional list/tuple specifying outer dimensions to add to
         the spec shape before sampling. If unspecified the outer_dims are
@@ -94,6 +102,7 @@ class RandomPyPolicy(py_policy.Base):
     super(RandomPyPolicy, self).__init__(
         time_step_spec=time_step_spec,
         action_spec=action_spec,
+        info_spec=info_spec,
         observation_and_action_constraint_splitter=(
             observation_and_action_constraint_splitter))
 
@@ -127,4 +136,7 @@ class RandomPyPolicy(py_policy.Base):
       random_action = array_spec.sample_spec_nest(
           self._action_spec, self._rng, outer_dims=outer_dims)
 
-    return policy_step.PolicyStep(random_action, policy_state)
+    info = array_spec.sample_spec_nest(
+        self._info_spec, self._rng, outer_dims=outer_dims)
+
+    return policy_step.PolicyStep(random_action, policy_state, info)

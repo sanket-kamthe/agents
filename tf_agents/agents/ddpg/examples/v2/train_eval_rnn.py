@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python2, python3
 r"""Train and Eval DDPG.
 
 To run:
@@ -40,7 +41,8 @@ from absl import flags
 from absl import logging
 
 import gin
-import tensorflow as tf
+from six.moves import range
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 
 from tf_agents.agents.ddpg import actor_rnn_network
 from tf_agents.agents.ddpg import critic_rnn_network
@@ -185,7 +187,8 @@ def train_eval(
         reward_scale_factor=reward_scale_factor,
         gradient_clipping=gradient_clipping,
         debug_summaries=debug_summaries,
-        summarize_grads_and_vars=summarize_grads_and_vars)
+        summarize_grads_and_vars=summarize_grads_and_vars,
+        train_step_counter=global_step)
     tf_agent.initialize()
 
     train_metrics = [
@@ -254,7 +257,7 @@ def train_eval(
 
     def train_step():
       experience, _ = next(iterator)
-      return tf_agent.train(experience, train_step_counter=global_step)
+      return tf_agent.train(experience)
 
     if use_tf_functions:
       train_step = common.function(train_step)

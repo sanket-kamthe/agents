@@ -19,8 +19,9 @@ from __future__ import division
 from __future__ import print_function
 
 from absl.testing import parameterized
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 from tf_agents.metrics import tf_metrics
+from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import trajectory
 
 from tensorflow.python.eager import context  # TF internal
@@ -67,13 +68,15 @@ class TFDequeTest(tf.test.TestCase):
 
     self.evaluate(d.add(2))
     self.evaluate(d.add(4))
-    self.assertEqual(3.0, self.evaluate(d.mean()))
+    self.assertEqual(3, self.evaluate(d.mean()))
+    self.assertEqual(tf.int32, d.mean().dtype)
 
   def test_mean_empty(self):
     d = tf_metrics.TFDeque(3, tf.int32)
     self.evaluate(tf.compat.v1.global_variables_initializer())
 
     self.assertEqual(0, self.evaluate(d.mean()))
+    self.assertEqual(tf.int32, d.mean().dtype)
 
   def test_mean_roll_over(self):
     d = tf_metrics.TFDeque(3, tf.float32)
@@ -93,6 +96,85 @@ class TFDequeTest(tf.test.TestCase):
     self.evaluate(d.extend([1, 2, 3, 4]))
     self.assertEqual(3.0, self.evaluate(d.mean()))
     self.assertEqual(tf.float32, d.mean().dtype)
+
+
+class TFShapedDequeTest(tf.test.TestCase):
+
+  def test_data_is_zero(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+    values = self.evaluate(d.data)
+    self.assertAllEqual((0, 2), values.shape)
+
+  def test_rolls_over(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.add([1, 1]))
+    self.evaluate(d.add([2, 2]))
+    self.evaluate(d.add([3, 3]))
+    self.assertAllEqual([[1, 1], [2, 2], [3, 3]], self.evaluate(d.data))
+
+    self.evaluate(d.add([4, 4]))
+    self.assertAllEqual([[4, 4], [2, 2], [3, 3]], self.evaluate(d.data))
+
+  def test_clear(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.add([1, 1]))
+
+    self.evaluate(d.clear())
+    self.assertAllEqual((0, 2), self.evaluate(d.data).shape)
+
+    self.evaluate(d.add([2, 2]))
+    self.evaluate(d.add([3, 3]))
+    self.assertAllEqual([[2, 2], [3, 3]], self.evaluate(d.data))
+
+  def test_mean_full(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.add([1, 1]))
+    self.evaluate(d.add([2, 2]))
+    self.evaluate(d.add([3, 3]))
+    self.assertAllEqual([2, 2], self.evaluate(d.mean()))
+    self.assertEqual(tf.int32, d.mean().dtype)
+
+  def test_mean_not_full(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.add([1, 1]))
+    self.evaluate(d.add([3, 3]))
+    self.assertAllEqual([2, 2], self.evaluate(d.mean()))
+    self.assertEqual(tf.int32, d.mean().dtype)
+
+  def test_mean_empty(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.assertAllEqual([0, 0], self.evaluate(d.mean()))
+    self.assertEqual(tf.int32, d.mean().dtype)
+
+  def test_mean_roll_over(self):
+    d = tf_metrics.TFDeque(3, tf.float32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.add([1, 1]))
+    self.evaluate(d.add([2, 2]))
+    self.evaluate(d.add([3, 3]))
+    self.evaluate(d.add([4, 4]))
+    self.assertAllEqual([3.0, 3.0], self.evaluate(d.mean()))
+    self.assertEqual(tf.float32, d.mean().dtype)
+
+  def test_extend(self):
+    d = tf_metrics.TFDeque(3, tf.int32, shape=(2,))
+    self.evaluate(tf.compat.v1.global_variables_initializer())
+
+    self.evaluate(d.extend([[1, 1], [2, 2], [3, 3], [4, 4]]))
+    self.assertAllEqual([[4, 4], [2, 2], [3, 3]], self.evaluate(d.data))
+    self.assertAllEqual([3, 3], self.evaluate(d.mean()))
 
 
 class TFMetricsTest(parameterized.TestCase, tf.test.TestCase):
@@ -137,6 +219,32 @@ class TFMetricsTest(parameterized.TestCase, tf.test.TestCase):
                         tf.constant([8.], dtype=tf.float32), [1.]))
 
     return [ts0, ts1, ts2, ts3, ts4, ts5]
+
+  def _create_misaligned_trajectories(self):
+
+    def _concat_nested_tensors(nest1, nest2):
+      return tf.nest.map_structure(lambda t1, t2: tf.concat([t1, t2], axis=0),
+                                   nest1, nest2)
+
+    # Order of args for trajectory methods:
+    # observation, action, policy_info, reward, discount
+    ts1 = _concat_nested_tensors(
+        trajectory.first((), tf.constant([2]), (),
+                         tf.constant([1.], dtype=tf.float32), [1.]),
+        trajectory.boundary((), tf.constant([1]), (),
+                            tf.constant([0.], dtype=tf.float32), [1.]))
+    ts2 = _concat_nested_tensors(
+        trajectory.last((), tf.constant([1]), (),
+                        tf.constant([3.], dtype=tf.float32), [1.]),
+        trajectory.first((), tf.constant([1]), (),
+                         tf.constant([2.], dtype=tf.float32), [1.]))
+    ts3 = _concat_nested_tensors(
+        trajectory.boundary((), tf.constant([2]), (),
+                            tf.constant([0.], dtype=tf.float32), [1.]),
+        trajectory.last((), tf.constant([1]), (),
+                        tf.constant([4.], dtype=tf.float32), [1.]))
+
+    return [ts1, ts2, ts3]
 
   @parameterized.named_parameters([
       ('testEnvironmentStepsGraph', context.graph_mode,
@@ -193,6 +301,91 @@ class TFMetricsTest(parameterized.TestCase, tf.test.TestCase):
       self.evaluate(metric.reset())
       self.assertEmpty(self.evaluate(metric.result()))
 
+  @parameterized.named_parameters([
+      ('testAverageReturnMultiMetricGraph', context.graph_mode, 6,
+       tensor_spec.TensorSpec((2,), tf.float32, 'r'), [9.0, 9.0]),
+      ('testAverageReturnMultiMetricEager', context.eager_mode, 6,
+       tensor_spec.TensorSpec((2,), tf.float32, 'r'), [9.0, 9.0]),
+      ('testAverageReturnMultiMetricRewardSpecListGraph', context.graph_mode, 6,
+       [tensor_spec.TensorSpec((), tf.float32, 'r1'),
+        tensor_spec.TensorSpec((), tf.float32, 'r2')], [9.0, 9.0]),
+      ('testAverageReturnMultiMetricRewardSpecListEager', context.eager_mode, 6,
+       [tensor_spec.TensorSpec((), tf.float32, 'r1'),
+        tensor_spec.TensorSpec((), tf.float32, 'r2')], [9.0, 9.0])
+  ])
+  def testAverageReturnMultiMetric(self, run_mode, num_trajectories,
+                                   reward_spec, expected_result):
+    with run_mode():
+      trajectories = self._create_trajectories()
+      multi_trajectories = []
+      for traj in trajectories:
+        if isinstance(reward_spec, list):
+          new_reward = [traj.reward, traj.reward]
+        else:
+          new_reward = tf.stack([traj.reward, traj.reward], axis=1)
+        new_traj = trajectory.Trajectory(
+            step_type=traj.step_type,
+            observation=traj.observation,
+            action=traj.action,
+            policy_info=traj.policy_info,
+            next_step_type=traj.next_step_type,
+            reward=new_reward,
+            discount=traj.discount)
+        multi_trajectories.append(new_traj)
+
+      metric = tf_metrics.AverageReturnMultiMetric(reward_spec, batch_size=2)
+      self.evaluate(tf.compat.v1.global_variables_initializer())
+      self.evaluate(metric.init_variables())
+      for i in range(num_trajectories):
+        self.evaluate(metric(multi_trajectories[i]))
+
+      self.assertAllEqual(expected_result, self.evaluate(metric.result()))
+      self.evaluate(metric.reset())
+      self.assertAllEqual([0.0, 0.0], self.evaluate(metric.result()))
+
+  @parameterized.named_parameters([
+      ('testAverageReturnMultiMetricTimeMisalignedGraph', context.graph_mode, 3,
+       tensor_spec.TensorSpec((2,), tf.float32, 'r'), [5.0, 5.0]),
+      ('testAverageReturnMultiMetricTimeMisalignedEager', context.eager_mode, 3,
+       tensor_spec.TensorSpec((2,), tf.float32, 'r'), [5.0, 5.0]),
+      ('testAverageReturnMultiMetricRewardSpecListTimeMisalignedGraph',
+       context.graph_mode, 3,
+       [tensor_spec.TensorSpec((), tf.float32, 'r1'),
+        tensor_spec.TensorSpec((), tf.float32, 'r2')], [5.0, 5.0]),
+      ('testAverageReturnMultiMetricRewardSpecListTimeMisalignedEager',
+       context.eager_mode, 3,
+       [tensor_spec.TensorSpec((), tf.float32, 'r1'),
+        tensor_spec.TensorSpec((), tf.float32, 'r2')], [5.0, 5.0])
+  ])
+  def testAverageReturnMultiMetricTimeMisalignment(
+      self, run_mode, num_trajectories, reward_spec, expected_result):
+    with run_mode():
+      trajectories = self._create_misaligned_trajectories()
+      multi_trajectories = []
+      for traj in trajectories:
+        if isinstance(reward_spec, list):
+          new_reward = [traj.reward, traj.reward]
+        else:
+          new_reward = tf.stack([traj.reward, traj.reward], axis=1)
+        new_traj = trajectory.Trajectory(
+            step_type=traj.step_type,
+            observation=traj.observation,
+            action=traj.action,
+            policy_info=traj.policy_info,
+            next_step_type=traj.next_step_type,
+            reward=new_reward,
+            discount=traj.discount)
+        multi_trajectories.append(new_traj)
+
+      metric = tf_metrics.AverageReturnMultiMetric(reward_spec, batch_size=2)
+      self.evaluate(tf.compat.v1.global_variables_initializer())
+      self.evaluate(metric.init_variables())
+      for i in range(num_trajectories):
+        self.evaluate(metric(multi_trajectories[i]))
+
+      self.assertAllEqual(expected_result, self.evaluate(metric.result()))
+      self.evaluate(metric.reset())
+      self.assertAllEqual([0.0, 0.0], self.evaluate(metric.result()))
 
 if __name__ == '__main__':
   tf.test.main()

@@ -17,15 +17,20 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# Using Type Annotations.
 from __future__ import print_function
 
-import tensorflow as tf
+from typing import Optional, Text
+
+import gin
+import tensorflow as tf  # pylint: disable=g-explicit-tensorflow-version-import
 import tensorflow_probability as tfp
 from tf_agents.policies import tf_policy
 from tf_agents.trajectories import policy_step
 
 
 # TODO(b/131405384): Remove this once Deterministic does casting internally.
+@tfp.experimental.register_composite
 class DeterministicWithLogProb(tfp.distributions.Deterministic):
   """Thin wrapper around Deterministic that supports taking log_prob."""
 
@@ -34,14 +39,15 @@ class DeterministicWithLogProb(tfp.distributions.Deterministic):
     return tf.math.log(tf.cast(self.prob(x), dtype=tf.float32))
 
 
-class GreedyPolicy(tf_policy.Base):
+@gin.configurable(module='tf_agents', blacklist=['policy'])
+class GreedyPolicy(tf_policy.TFPolicy):
   """Returns greedy samples of a given policy."""
 
-  def __init__(self, policy, name=None):
+  def __init__(self, policy: tf_policy.TFPolicy, name: Optional[Text] = None):
     """Builds a greedy TFPolicy wrapping the given policy.
 
     Args:
-      policy: A policy implementing the tf_policy.Base interface.
+      policy: A policy implementing the tf_policy.TFPolicy interface.
       name: The name of this policy. All variables in this module will fall
         under that name. Defaults to the class name.
     """
@@ -53,6 +59,10 @@ class GreedyPolicy(tf_policy.Base):
         emit_log_probability=policy.emit_log_probability,
         name=name)
     self._wrapped_policy = policy
+
+  @property
+  def wrapped_policy(self) -> tf_policy.TFPolicy:
+    return self._wrapped_policy
 
   def _variables(self):
     return self._wrapped_policy.variables()

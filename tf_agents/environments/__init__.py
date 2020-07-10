@@ -15,8 +15,8 @@
 
 """Environments module."""
 
+# TODO(b/155801943): Bring parallel_py_environment here once we're py3-only.
 from tf_agents.environments import batched_py_environment
-from tf_agents.environments import parallel_py_environment
 from tf_agents.environments import py_environment
 from tf_agents.environments import random_py_environment
 from tf_agents.environments import random_tf_environment
